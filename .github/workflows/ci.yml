@@ -229,7 +229,7 @@ jobs:
 
           Test-RemoteText -name 'runner map' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/mystraSIGIL-runner-map.json'
           Test-RemoteText -name 'preload script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/Preload-Assets.ps1'
-          Test-RemoteText -name 'initialize script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Initialize-automation.ps1'
+          Test-RemoteText -name 'initialize script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/Initialize-automation.ps1'
 
       - name: "Preload"
         run: |
