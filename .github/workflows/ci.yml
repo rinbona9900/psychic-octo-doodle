@@ -218,7 +218,6 @@ jobs:
       RUNNER_ENV:    "hosted"
       RUNNER_TITLE:  ${{ github.event.inputs.RUNNER_PROFILE }}
       MYSTRASIGIL_RUNNER_LABEL: ${{ needs.initializing-automation.outputs.runner_label }}
-      MYSTRASIGIL_ARMORY_URL:   ${{ env.MYSTRASIGIL_ARMORY_URL }}
       Access_Token_by_Shahzaib: ${{ secrets.Access_Token_by_Shahzaib }}
 
     defaults:
