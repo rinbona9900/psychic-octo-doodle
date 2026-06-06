@@ -4,44 +4,44 @@ on:
   workflow_dispatch:
     inputs:
       RUNNER_PROFILE:
-        description: "Select Profile"
+        description: "Select Profile (display names; runner mappings are resolved from mystraSIGIL-runner-map.json)"
         required: true
         type: choice
-        default: win-128-core
+        default: "Windows 64 Core"
         options:
           # ── WINDOWS ─────────────────────────────
-          - win-64-core
-          - win-128-core
-          - win-nextgen
-          - win-vs2026
-          - win-latest
+          - "Windows 64 Core"
+          - "Windows 128 Core"
+          - "Windows 11 ARM"
+          - "Windows High Performance"
+          - "Windows Enterprise"
           # ── UBUNTU ──────────────────────────────
-          - ubuntu-x64-24
-          - ubuntu-x64-22
-          - ubuntu-latest
-          - ubuntu-slim
-          - ubuntu-arm64-24
-          - ubuntu-arm64-22
+          - "Ubuntu 24 LTS x64"
+          - "Ubuntu 22 LTS x64"
+          - "Ubuntu Latest"
+          - "Ubuntu Slim"
+          - "Ubuntu 24 ARM"
+          - "Ubuntu 22 ARM"
           # ── macOS STANDARD ──────────────────────
-          - mac-intel-13
-          - mac-intel-15
-          - mac-intel-26
-          - mac-m1-14
-          - mac-m1-15
-          - mac-m1-26
-          - mac-latest
-          # ── macOS LARGER — M2 XLarge ────────────
-          - mac-m2-13-xl
-          - mac-m2-14-xl
-          - mac-m2-15-xl
-          - mac-m2-26-xl
-          - mac-m2-latest-xl
+          - "macOS 13 Intel"
+          - "macOS 15 Intel"
+          - "macOS 26 Intel"
+          - "macOS 14 M1"
+          - "macOS 15 M1"
+          - "macOS 26 M1"
+          - "macOS Latest"
+          # ── macOS LARGER — M1 XLarge ────────────
+          - "macOS 13 Intel XLarge"
+          - "macOS 14 Intel XLarge"
+          - "macOS 15 Intel XLarge"
+          - "macOS 26 Intel XLarge"
+          - "macOS Latest XLarge"
           # ── macOS LARGER — Intel Large ───────────
-          - mac-intel-13-lg
-          - mac-intel-14-lg
-          - mac-intel-15-lg
-          - mac-intel-26-lg
-          - mac-intel-latest-lg
+          - "macOS 13 Intel Large"
+          - "macOS 14 Intel Large"
+          - "macOS 15 Intel Large"
+          - "macOS 26 Intel Large"
+          - "macOS Latest Large"
       CODE:
         description: "Full headless command (Windows)."
         required: true
@@ -91,19 +91,25 @@ jobs:
           }
 
           function New-FallbackRunnerMap {
+            # Mirrors the v2 schema used in mystraSIGIL-runner-map.json.
             return [pscustomobject]@{
+              version = 2
+              default_profile = "Windows 64 Core"
               profiles = [pscustomobject]@{
-                'win-64-core'  = 'windows-2022'
-                'win-128-core' = 'windows-11-arm'
-                'win-nextgen'  = 'windows-2025'
-                'win-latest'   = 'windows-latest'
+                'Windows 64 Core'          = [pscustomobject]@{ id='windows-64-core'; runner='windows-2022';        display_name='Windows 64 Core'; tier='stable' }
+                'Windows 128 Core'         = [pscustomobject]@{ id='windows-128-core'; runner='windows-latest';      display_name='Windows 128 Core'; tier='stable' }
+                'Windows 11 ARM'           = [pscustomobject]@{ id='windows-11-arm'; runner='windows-11-arm';        display_name='Windows 11 ARM'; tier='stable' }
+                'Windows High Performance' = [pscustomobject]@{ id='windows-high-perf'; runner='windows-2025';       display_name='Windows High Performance'; tier='preview' }
+                'Windows Enterprise'       = [pscustomobject]@{ id='windows-enterprise'; runner='windows-2025-vs2026'; display_name='Windows Enterprise'; tier='preview' }
               }
-              aliases = [pscustomobject]@{
-                default = 'win-128-core'
-                arm     = 'win-128-core'
-                stable  = 'win-latest'
+              runner_definitions = [pscustomobject]@{
+                'windows-2022'        = [pscustomobject]@{ github_label='windows-2022'; os='windows'; architecture='x64' }
+                'windows-latest'      = [pscustomobject]@{ github_label='windows-latest'; os='windows'; architecture='x64' }
+                'windows-11-arm'      = [pscustomobject]@{ github_label='windows-11-arm'; os='windows'; architecture='arm64' }
+                'windows-2025'        = [pscustomobject]@{ github_label='windows-2025'; os='windows'; architecture='x64' }
+                'windows-2025-vs2026' = [pscustomobject]@{ github_label='windows-2025-vs2026'; os='windows'; architecture='x64' }
               }
-              allowed_runners = @('windows-2022','windows-11-arm','windows-2025','windows-latest')
+              allowed_runners = @('windows-2022','windows-latest','windows-11-arm','windows-2025','windows-2025-vs2026')
             }
           }
 
@@ -148,19 +154,28 @@ jobs:
               throw "Invalid map: missing 'profiles' object."
             }
 
-            $aliases = Resolve-Property $cfg 'aliases'
-            $effectiveProfile = $selectedProfile
-            if ($null -ne $aliases) {
-              $aliasTarget = Resolve-Property $aliases $selectedProfile
-              if (-not [string]::IsNullOrWhiteSpace("$aliasTarget")) {
-                $effectiveProfile = "$aliasTarget"
+            # Resolve the selected profile (display name -> profile object).
+            # Also accept profile 'id' or 'runner' for backward compatibility.
+            $profileObj = Resolve-Property $profiles $selectedProfile
+            $matchType = "display_name"
+            if ($null -eq $profileObj) {
+              foreach ($entry in $profiles.PSObject.Properties) {
+                $pObj = $entry.Value
+                $pId = if ($pObj.PSObject.Properties['id']) { [string]$pObj.id } else { $null }
+                $pRunner = if ($pObj.PSObject.Properties['runner']) { [string]$pObj.runner } else { $null }
+                if ($pId -eq $selectedProfile) { $profileObj = $pObj; $matchType = "id"; break }
+                if ($pRunner -eq $selectedProfile) { $profileObj = $pObj; $matchType = "runner"; break }
               }
             }
 
-            $runnerLabel = Resolve-Property $profiles $effectiveProfile
-            if ([string]::IsNullOrWhiteSpace("$runnerLabel")) {
+            if ($null -eq $profileObj) {
               $available = @($profiles.PSObject.Properties.Name) -join ', '
-              throw "Profile '$selectedProfile' (effective '$effectiveProfile') not found in hosted map. Available: $available"
+              throw "Profile '$selectedProfile' not found in hosted map. Available: $available"
+            }
+
+            $runnerLabel = if ($profileObj.PSObject.Properties['runner']) { [string]$profileObj.runner } else { $null }
+            if ([string]::IsNullOrWhiteSpace("$runnerLabel")) {
+              throw "Profile '$selectedProfile' has no 'runner' field."
             }
 
             $allowed = Resolve-Property $cfg 'allowed_runners'
@@ -174,6 +189,7 @@ jobs:
               throw "Resolved runner '$runnerLabel' is not in allowlist: $($allowed -join ', ')"
             }
 
+            Write-Host "Profile resolved: input='$selectedProfile' match=$matchType -> runner=$runnerLabel"
             Set-ResolveOutput -runnerLabel "$runnerLabel"
           }
           catch {
@@ -195,6 +211,7 @@ jobs:
       BRANCH:        ${{ github.ref_name }}
       RUNNER_ENV:    "hosted"
       RUNNER_TITLE:  ${{ github.event.inputs.RUNNER_PROFILE }}
+      MYSTRASIGIL_RUNNER_LABEL: ${{ needs.initializing-automation.outputs.runner_label }}
       Access_Token_by_Shahzaib: ${{ secrets.Access_Token_by_Shahzaib }}
 
     defaults:
@@ -229,7 +246,7 @@ jobs:
 
           Test-RemoteText -name 'runner map' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/mystraSIGIL-runner-map.json'
           Test-RemoteText -name 'preload script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/Preload-Assets.ps1'
-          Test-RemoteText -name 'initialize script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/Initialize-automation.ps1'
+          Test-RemoteText -name 'initialize script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Initialize-automation.ps1'
 
       - name: "Preload"
         run: |
