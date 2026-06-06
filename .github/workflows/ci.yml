@@ -1,0 +1,312 @@
+name: "⚡🔐✋ mystraSIGIL - A Virtual Fortress"
+
+on:
+  workflow_dispatch:
+    inputs:
+      RUNNER_PROFILE:
+        description: "Select Profile"
+        required: true
+        type: choice
+        default: win-128-core
+        options:
+          - win-64-core
+          - win-128-core
+          - win-nextgen
+          - win-latest
+      CODE:
+        description: "Full headless command (Windows)."
+        required: true
+      PIN:
+        description: "PIN (6+ digits)."
+        required: false
+        default: "123456"
+      RETRIES:
+        description: "CRD Retries"
+        required: false
+        default: "3"
+
+permissions:
+  contents: read
+
+jobs:
+  initializing-automation:
+    name: "Initializing Automation"
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    outputs:
+      runner_label: ${{ steps.resolve.outputs.runner_label }}
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - id: resolve
+        env:
+          PROFILE: ${{ github.event.inputs.RUNNER_PROFILE }}
+          MAP_URL: "https://gitlab.com/ShahzaibYT/test/-/raw/main/mystraSIGIL-runner-map.json"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          function Set-ResolveOutput([string]$runnerLabel) {
+            "runner_label=$runnerLabel"     >> $env:GITHUB_OUTPUT
+          }
+
+          function Resolve-Property([object]$obj, [string]$name) {
+            if ($null -eq $obj) { return $null }
+            $prop = $obj.PSObject.Properties[$name]
+            if ($null -eq $prop) { return $null }
+            return $prop.Value
+          }
+
+          function New-FallbackRunnerMap {
+            return [pscustomobject]@{
+              profiles = [pscustomobject]@{
+                'win-64-core'  = 'windows-2022'
+                'win-128-core' = 'windows-11-arm'
+                'win-nextgen'  = 'windows-2025'
+                'win-latest'   = 'windows-latest'
+              }
+              aliases = [pscustomobject]@{
+                default = 'win-128-core'
+                arm     = 'win-128-core'
+                stable  = 'win-latest'
+              }
+              allowed_runners = @('windows-2022','windows-11-arm','windows-2025','windows-latest')
+            }
+          }
+
+          $selectedProfile = "$($env:PROFILE)"
+          $mapUrl = "$($env:MAP_URL)"
+          if ([string]::IsNullOrWhiteSpace($mapUrl)) {
+            throw "MAP_URL is empty. Set a valid hosted GitLab raw JSON URL in the workflow."
+          }
+
+          try {
+            $resp = $null
+            for ($i = 1; $i -le 3; $i++) {
+              try {
+                $resp = Invoke-WebRequest -Uri $mapUrl -UseBasicParsing -TimeoutSec 45
+                break
+              } catch {
+                if ($i -eq 3) { throw }
+                Start-Sleep -Seconds (2 * $i)
+              }
+            }
+
+            if ([string]::IsNullOrWhiteSpace($resp.Content)) {
+              throw "Hosted map returned empty content."
+            }
+
+            try {
+              $content = [string]$resp.Content
+              if ($content -match '(?m)^(<<<<<<<|=======|>>>>>>>)') {
+                throw "hosted map contains unresolved merge conflict markers"
+              }
+              if ($content.TrimStart().StartsWith('<')) {
+                throw "hosted map returned non-JSON content"
+              }
+              $cfg = $content | ConvertFrom-Json
+            } catch {
+              Write-Warning "Hosted map is invalid: $($_.Exception.Message). Using embedded fallback runner map so automation can continue."
+              $cfg = New-FallbackRunnerMap
+            }
+
+            $profiles = Resolve-Property $cfg 'profiles'
+            if ($null -eq $profiles) {
+              throw "Invalid map: missing 'profiles' object."
+            }
+
+            $aliases = Resolve-Property $cfg 'aliases'
+            $effectiveProfile = $selectedProfile
+            if ($null -ne $aliases) {
+              $aliasTarget = Resolve-Property $aliases $selectedProfile
+              if (-not [string]::IsNullOrWhiteSpace("$aliasTarget")) {
+                $effectiveProfile = "$aliasTarget"
+              }
+            }
+
+            $runnerLabel = Resolve-Property $profiles $effectiveProfile
+            if ([string]::IsNullOrWhiteSpace("$runnerLabel")) {
+              $available = @($profiles.PSObject.Properties.Name) -join ', '
+              throw "Profile '$selectedProfile' (effective '$effectiveProfile') not found in hosted map. Available: $available"
+            }
+
+            $allowed = Resolve-Property $cfg 'allowed_runners'
+            if ($null -eq $allowed -or @($allowed).Count -eq 0) {
+              throw "Invalid map: missing or empty 'allowed_runners' array."
+            } else {
+              $allowed = @($allowed | ForEach-Object { "$_".Trim() })
+            }
+
+            if ($allowed -notcontains "$runnerLabel") {
+              throw "Resolved runner '$runnerLabel' is not in allowlist: $($allowed -join ', ')"
+            }
+
+            Set-ResolveOutput -runnerLabel "$runnerLabel"
+          }
+          catch {
+            throw "Hosted map resolution failed (fail-closed): $($_.Exception.Message)"
+          }
+
+  crd-register:
+    name: "mystraSIGIL"
+
+    needs: initializing-automation
+
+    runs-on: ${{ needs.initializing-automation.outputs.runner_label }}
+    timeout-minutes: 360
+
+    env:
+      RAW_CODE:      ${{ github.event.inputs.CODE }}
+      PIN_INPUT:     ${{ github.event.inputs.PIN }}
+      RETRIES_INPUT: ${{ github.event.inputs.RETRIES }}
+      BRANCH:        ${{ github.ref_name }}
+      RUNNER_ENV:    "hosted"
+      RUNNER_TITLE:  ${{ github.event.inputs.RUNNER_PROFILE }}
+      Access_Token_by_Shahzaib: ${{ secrets.Access_Token_by_Shahzaib }}
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: "Preflight"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          function Test-RemoteText([string]$name, [string]$url) {
+            try {
+              $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 45 -MaximumRedirection 5
+              if ([string]::IsNullOrWhiteSpace($resp.Content)) {
+                throw "empty response"
+              }
+              Write-Host "Preflight OK: $name"
+            } catch {
+              throw "Preflight failed for ${name}: $($_.Exception.Message)"
+            }
+          }
+
+          if (-not $env:Access_Token_by_Shahzaib) {
+            throw "Missing required repository secret: Access_Token_by_Shahzaib"
+          }
+          Write-Host "::add-mask::$($env:Access_Token_by_Shahzaib)"
+          if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
+          if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
+
+          Test-RemoteText -name 'runner map' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/mystraSIGIL-runner-map.json'
+          Test-RemoteText -name 'preload script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Preload-Assets.ps1'
+          Test-RemoteText -name 'initialize script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Initialize-automation.ps1'
+
+      - name: "Preload"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          function Invoke-DownloadWithRetry([string]$url, [string]$outFile, [int]$maxAttempts = 3) {
+            $lastError = $null
+            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+              try {
+                Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -TimeoutSec 120
+                if (-not (Test-Path -LiteralPath $outFile)) {
+                  throw "Downloaded file not found at $outFile"
+                }
+                return
+              } catch {
+                $lastError = $_
+                if ($attempt -lt $maxAttempts) {
+                  Start-Sleep -Seconds (2 * $attempt)
+                }
+              }
+            }
+            throw "Failed to download $url after $maxAttempts attempts. $($lastError.Exception.Message)"
+          }
+
+          if (-not $env:Access_Token_by_Shahzaib) {
+            Write-Error "Missing required repository secret: Access_Token_by_Shahzaib"
+            exit 1
+          }
+          Write-Host "::add-mask::$($env:Access_Token_by_Shahzaib)"
+          if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
+          if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
+          Write-Host "Access token present: yes"
+
+          $preloadUrl  = "https://gitlab.com/ShahzaibYT/test/-/raw/main/Preload-Assets.ps1"
+          $preloadTemp = Join-Path $env:TEMP ("Preload-Assets_{0}.ps1" -f $env:GITHUB_RUN_ID)
+
+          try {
+            Invoke-DownloadWithRetry -url $preloadUrl -outFile $preloadTemp -maxAttempts 3
+
+            powershell.exe -ExecutionPolicy Bypass -File $preloadTemp
+
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "Preload script reported exit code $LASTEXITCODE. Continuing so main automation can still attempt every phase."
+              $global:LASTEXITCODE = 0
+            }
+          } catch {
+            Write-Warning "Preload step failed non-fatally: $($_.Exception.Message). Continuing to Execute phase."
+            $global:LASTEXITCODE = 0
+          } finally {
+            if (Test-Path -LiteralPath $preloadTemp) {
+              Remove-Item -LiteralPath $preloadTemp -Force -ErrorAction SilentlyContinue
+            }
+          }
+
+      - name: "Execute"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          function Invoke-DownloadWithRetry([string]$url, [string]$outFile, [int]$maxAttempts = 3) {
+            $lastError = $null
+            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+              try {
+                Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -TimeoutSec 120
+                if (-not (Test-Path -LiteralPath $outFile)) {
+                  throw "Downloaded file not found at $outFile"
+                }
+                return
+              } catch {
+                $lastError = $_
+                if ($attempt -lt $maxAttempts) {
+                  Start-Sleep -Seconds (2 * $attempt)
+                }
+              }
+            }
+            throw "Failed to download $url after $maxAttempts attempts. $($lastError.Exception.Message)"
+          }
+
+          if (-not $env:Access_Token_by_Shahzaib) {
+            throw "Missing required repository secret: Access_Token_by_Shahzaib"
+          }
+          Write-Host "::add-mask::$($env:Access_Token_by_Shahzaib)"
+          if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
+          if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
+
+          $url      = "https://gitlab.com/ShahzaibYT/test/-/raw/main/Initialize-automation.ps1"
+          $scriptTp = Join-Path $env:TEMP ("Initialize-automation_{0}.ps1" -f $env:GITHUB_RUN_ID)
+
+          try {
+            Invoke-DownloadWithRetry -url $url -outFile $scriptTp -maxAttempts 3
+
+            powershell.exe -ExecutionPolicy Bypass -File $scriptTp `
+              -Code       ($env:RAW_CODE) `
+              -Pin        ($env:PIN_INPUT) `
+              -Retries    ($env:RETRIES_INPUT) `
+              -GateSecret ($env:Access_Token_by_Shahzaib)
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Execution script failed with exit code $LASTEXITCODE"
+            }
+
+          } finally {
+            if (Test-Path -LiteralPath $scriptTp) {
+              Remove-Item -LiteralPath $scriptTp -Force -ErrorAction SilentlyContinue
+            }
+          }
