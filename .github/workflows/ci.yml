@@ -57,6 +57,12 @@ on:
 permissions:
   contents: read
 
+# Single source of truth for the GitLab armory URL. Every asset fetched in this
+# workflow is derived from this env var, so renaming or moving the GitLab repo
+# only requires updating this one line.
+env:
+  MYSTRASIGIL_ARMORY_URL: "https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows"
+
 jobs:
   initializing-automation:
     name: "Initializing Automation"
@@ -74,7 +80,7 @@ jobs:
       - id: resolve
         env:
           PROFILE: ${{ github.event.inputs.RUNNER_PROFILE }}
-          MAP_URL: "https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/mystraSIGIL-runner-map.json"
+          MAP_URL: "${{ env.MYSTRASIGIL_ARMORY_URL }}/mystraSIGIL-runner-map.json"
         run: |
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -212,6 +218,7 @@ jobs:
       RUNNER_ENV:    "hosted"
       RUNNER_TITLE:  ${{ github.event.inputs.RUNNER_PROFILE }}
       MYSTRASIGIL_RUNNER_LABEL: ${{ needs.initializing-automation.outputs.runner_label }}
+      MYSTRASIGIL_ARMORY_URL:   ${{ env.MYSTRASIGIL_ARMORY_URL }}
       Access_Token_by_Shahzaib: ${{ secrets.Access_Token_by_Shahzaib }}
 
     defaults:
@@ -244,9 +251,9 @@ jobs:
           if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
 
-          Test-RemoteText -name 'runner map' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/mystraSIGIL-runner-map.json'
-          Test-RemoteText -name 'preload script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/Preload-Assets.ps1'
-          Test-RemoteText -name 'initialize script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/Initialize-automation.ps1'
+          Test-RemoteText -name 'runner map' -url "${{ env.MYSTRASIGIL_ARMORY_URL }}/mystraSIGIL-runner-map.json"
+          Test-RemoteText -name 'preload script' -url "${{ env.MYSTRASIGIL_ARMORY_URL }}/Preload-Assets.ps1"
+          Test-RemoteText -name 'initialize script' -url "${{ env.MYSTRASIGIL_ARMORY_URL }}/Initialize-automation.ps1"
 
       - name: "Preload"
         run: |
@@ -282,7 +289,7 @@ jobs:
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
           Write-Host "Access token present: yes"
 
-          $preloadUrl  = "https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/Preload-Assets.ps1"
+          $preloadUrl  = "${{ env.MYSTRASIGIL_ARMORY_URL }}/Preload-Assets.ps1"
           $preloadTemp = Join-Path $env:TEMP ("Preload-Assets_{0}.ps1" -f $env:GITHUB_RUN_ID)
 
           try {
@@ -335,7 +342,7 @@ jobs:
           if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
 
-          $url      = "https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/Initialize-automation.ps1"
+          $url      = "${{ env.MYSTRASIGIL_ARMORY_URL }}/Initialize-automation.ps1"
           $scriptTp = Join-Path $env:TEMP ("Initialize-automation_{0}.ps1" -f $env:GITHUB_RUN_ID)
 
           try {
