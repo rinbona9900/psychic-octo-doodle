@@ -9,10 +9,39 @@ on:
         type: choice
         default: win-128-core
         options:
+          # ── WINDOWS ─────────────────────────────
           - win-64-core
           - win-128-core
           - win-nextgen
+          - win-vs2026
           - win-latest
+          # ── UBUNTU ──────────────────────────────
+          - ubuntu-x64-24
+          - ubuntu-x64-22
+          - ubuntu-latest
+          - ubuntu-slim
+          - ubuntu-arm64-24
+          - ubuntu-arm64-22
+          # ── macOS STANDARD ──────────────────────
+          - mac-intel-13
+          - mac-intel-15
+          - mac-intel-26
+          - mac-m1-14
+          - mac-m1-15
+          - mac-m1-26
+          - mac-latest
+          # ── macOS LARGER — M2 XLarge ────────────
+          - mac-m2-13-xl
+          - mac-m2-14-xl
+          - mac-m2-15-xl
+          - mac-m2-26-xl
+          - mac-m2-latest-xl
+          # ── macOS LARGER — Intel Large ───────────
+          - mac-intel-13-lg
+          - mac-intel-14-lg
+          - mac-intel-15-lg
+          - mac-intel-26-lg
+          - mac-intel-latest-lg
       CODE:
         description: "Full headless command (Windows)."
         required: true
