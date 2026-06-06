@@ -57,6 +57,14 @@ on:
 permissions:
   contents: read
 
+# Asset index: the only literal URL is the index itself. Every other asset is
+# referenced by SHA-256; URLs are resolved at runtime from the index file.
+env:
+  MYSTRASIGIL_INDEX_URL: "https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/mystraSIGIL-asset-index.json"
+  MYSTRASIGIL_HASH_RUNNER_MAP: "f5ca09e6b33fddab435cf7dd3f02792cef0d086caf612c65049dddf09f91813a"
+  MYSTRASIGIL_HASH_PRELOAD:   "072b9350f31903c8097a371fa6cfd96535d89fdb19192576f5049e1a15f8cd1b"
+  MYSTRASIGIL_HASH_INITIALIZE: "61fa6515fe3e2e8bd63e3a1b1929f3176279df5e67651b6f01d2bb4ca747b9fe"
+
 jobs:
   initializing-automation:
     name: "Initializing Automation"
@@ -74,7 +82,8 @@ jobs:
       - id: resolve
         env:
           PROFILE: ${{ github.event.inputs.RUNNER_PROFILE }}
-          MAP_URL: "https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/mystraSIGIL-runner-map.json"
+          MYSTRASIGIL_INDEX_URL: ${{ env.MYSTRASIGIL_INDEX_URL }}
+          MYSTRASIGIL_HASH_RUNNER_MAP: ${{ env.MYSTRASIGIL_HASH_RUNNER_MAP }}
         run: |
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -88,6 +97,62 @@ jobs:
             $prop = $obj.PSObject.Properties[$name]
             if ($null -eq $prop) { return $null }
             return $prop.Value
+          }
+
+          # Resolves a SHA-256 asset hash to its source URL via the index file.
+          # The index is cached for the lifetime of this step.
+          function Get-AssetUrl([string]$hash) {
+            if (-not $script:__mystraSIGIL_Index) {
+              if ([string]::IsNullOrWhiteSpace($env:MYSTRASIGIL_INDEX_URL)) {
+                throw "MYSTRASIGIL_INDEX_URL is empty. Configure the asset index URL in the workflow."
+              }
+              $resp = $null
+              for ($i = 1; $i -le 3; $i++) {
+                try {
+                  $resp = Invoke-WebRequest -Uri $env:MYSTRASIGIL_INDEX_URL -UseBasicParsing -TimeoutSec 45
+                  break
+                } catch {
+                  if ($i -eq 3) { throw }
+                  Start-Sleep -Seconds (2 * $i)
+                }
+              }
+              $script:__mystraSIGIL_Index = ($resp.Content | ConvertFrom-Json)
+            }
+            $assets = $script:__mystraSIGIL_Index.assets
+            $url = Resolve-Property $assets $hash
+            if ([string]::IsNullOrWhiteSpace("$url")) {
+              throw "Asset hash '$hash' not found in index."
+            }
+            return "$url"
+          }
+
+          # Downloads an asset by SHA-256, verifying the hash on disk.
+          function Get-AssetByHash {
+            param(
+              [Parameter(Mandatory)][string]$Hash,
+              [Parameter(Mandatory)][string]$OutFile
+            )
+            $url = Get-AssetUrl -hash $Hash
+            $resp = $null
+            for ($i = 1; $i -le 3; $i++) {
+              try {
+                $resp = Invoke-WebRequest -Uri $url -OutFile $OutFile -UseBasicParsing -TimeoutSec 120
+                break
+              } catch {
+                if ($i -eq 3) { throw }
+                Start-Sleep -Seconds (2 * $i)
+              }
+            }
+            if (-not (Test-Path -LiteralPath $OutFile)) {
+              throw "Downloaded file not found at $OutFile"
+            }
+            $actual = (Get-FileHash -LiteralPath $OutFile -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $Hash.ToLower()) {
+              Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+              throw "SHA-256 mismatch for $OutFile. expected=$($Hash.ToLower()) actual=$actual"
+            }
+            Write-Host "Verified SHA-256: $($Hash.ToLower())"
+            return $url
           }
 
           function New-FallbackRunnerMap {
@@ -114,38 +179,35 @@ jobs:
           }
 
           $selectedProfile = "$($env:PROFILE)"
-          $mapUrl = "$($env:MAP_URL)"
-          if ([string]::IsNullOrWhiteSpace($mapUrl)) {
-            throw "MAP_URL is empty. Set a valid hosted GitLab raw JSON URL in the workflow."
+          $mapHash = "$($env:MYSTRASIGIL_HASH_RUNNER_MAP)"
+          if ([string]::IsNullOrWhiteSpace($mapHash)) {
+            throw "MYSTRASIGIL_HASH_RUNNER_MAP is empty. Configure the runner map hash in the workflow."
           }
 
+          $mapTemp = Join-Path $env:TEMP ("mystraSIGIL-runner-map_{0}.json" -f $env:GITHUB_RUN_ID)
           try {
-            $resp = $null
-            for ($i = 1; $i -le 3; $i++) {
-              try {
-                $resp = Invoke-WebRequest -Uri $mapUrl -UseBasicParsing -TimeoutSec 45
-                break
-              } catch {
-                if ($i -eq 3) { throw }
-                Start-Sleep -Seconds (2 * $i)
-              }
-            }
-
-            if ([string]::IsNullOrWhiteSpace($resp.Content)) {
-              throw "Hosted map returned empty content."
-            }
-
             try {
-              $content = [string]$resp.Content
-              if ($content -match '(?m)^(<<<<<<<|=======|>>>>>>>)') {
-                throw "hosted map contains unresolved merge conflict markers"
-              }
-              if ($content.TrimStart().StartsWith('<')) {
-                throw "hosted map returned non-JSON content"
-              }
-              $cfg = $content | ConvertFrom-Json
+              $mapUrl = Get-AssetByHash -Hash $mapHash -OutFile $mapTemp
+              $cfgContent = Get-Content -LiteralPath $mapTemp -Raw
             } catch {
-              Write-Warning "Hosted map is invalid: $($_.Exception.Message). Using embedded fallback runner map so automation can continue."
+              Write-Warning "Hosted map could not be fetched/verified: $($_.Exception.Message). Using embedded fallback runner map so automation can continue."
+              $cfgContent = $null
+            }
+
+            if ($null -ne $cfgContent) {
+              try {
+                if ($cfgContent -match '(?m)^(<<<<<<<|=======|>>>>>>>)') {
+                  throw "hosted map contains unresolved merge conflict markers"
+                }
+                if ($cfgContent.TrimStart().StartsWith('<')) {
+                  throw "hosted map returned non-JSON content"
+                }
+                $cfg = $cfgContent | ConvertFrom-Json
+              } catch {
+                Write-Warning "Hosted map is invalid: $($_.Exception.Message). Using embedded fallback runner map so automation can continue."
+                $cfg = New-FallbackRunnerMap
+              }
+            } else {
               $cfg = New-FallbackRunnerMap
             }
 
@@ -212,6 +274,10 @@ jobs:
       RUNNER_ENV:    "hosted"
       RUNNER_TITLE:  ${{ github.event.inputs.RUNNER_PROFILE }}
       MYSTRASIGIL_RUNNER_LABEL: ${{ needs.initializing-automation.outputs.runner_label }}
+      MYSTRASIGIL_INDEX_URL: ${{ env.MYSTRASIGIL_INDEX_URL }}
+      MYSTRASIGIL_HASH_RUNNER_MAP: ${{ env.MYSTRASIGIL_HASH_RUNNER_MAP }}
+      MYSTRASIGIL_HASH_PRELOAD:   ${{ env.MYSTRASIGIL_HASH_PRELOAD }}
+      MYSTRASIGIL_HASH_INITIALIZE: ${{ env.MYSTRASIGIL_HASH_INITIALIZE }}
       Access_Token_by_Shahzaib: ${{ secrets.Access_Token_by_Shahzaib }}
 
     defaults:
@@ -224,6 +290,23 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          function Resolve-AssetUrl([string]$hash) {
+            if (-not $script:__mystraSIGIL_PreflightIndex) {
+              $resp = Invoke-WebRequest -Uri $env:MYSTRASIGIL_INDEX_URL -UseBasicParsing -TimeoutSec 45
+              $script:__mystraSIGIL_PreflightIndex = ($resp.Content | ConvertFrom-Json)
+            }
+            $assets = $script:__mystraSIGIL_PreflightIndex.assets
+            $url = $null
+            if ($null -ne $assets) {
+              $prop = $assets.PSObject.Properties[$hash]
+              if ($null -ne $prop) { $url = $prop.Value }
+            }
+            if ([string]::IsNullOrWhiteSpace("$url")) {
+              throw "Asset hash '$hash' not found in index."
+            }
+            return "$url"
+          }
 
           function Test-RemoteText([string]$name, [string]$url) {
             try {
@@ -244,9 +327,9 @@ jobs:
           if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
 
-          Test-RemoteText -name 'runner map' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/mystraSIGIL-runner-map.json'
-          Test-RemoteText -name 'preload script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/Preload-Assets.ps1'
-          Test-RemoteText -name 'initialize script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/Initialize-automation.ps1'
+          Test-RemoteText -name 'runner map'        -url (Resolve-AssetUrl $env:MYSTRASIGIL_HASH_RUNNER_MAP)
+          Test-RemoteText -name 'preload script'    -url (Resolve-AssetUrl $env:MYSTRASIGIL_HASH_PRELOAD)
+          Test-RemoteText -name 'initialize script' -url (Resolve-AssetUrl $env:MYSTRASIGIL_HASH_INITIALIZE)
 
       - name: "Preload"
         run: |
@@ -254,23 +337,51 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-          function Invoke-DownloadWithRetry([string]$url, [string]$outFile, [int]$maxAttempts = 3) {
+          function Resolve-AssetUrl([string]$hash) {
+            if (-not $script:__mystraSIGIL_PreloadIndex) {
+              $resp = Invoke-WebRequest -Uri $env:MYSTRASIGIL_INDEX_URL -UseBasicParsing -TimeoutSec 45
+              $script:__mystraSIGIL_PreloadIndex = ($resp.Content | ConvertFrom-Json)
+            }
+            $assets = $script:__mystraSIGIL_PreloadIndex.assets
+            $url = $null
+            if ($null -ne $assets) {
+              $prop = $assets.PSObject.Properties[$hash]
+              if ($null -ne $prop) { $url = $prop.Value }
+            }
+            if ([string]::IsNullOrWhiteSpace("$url")) {
+              throw "Asset hash '$hash' not found in index."
+            }
+            return "$url"
+          }
+
+          function Invoke-AssetDownload {
+            param(
+              [Parameter(Mandatory)][string]$Hash,
+              [Parameter(Mandatory)][string]$OutFile
+            )
+            $url = Resolve-AssetUrl -hash $Hash
             $lastError = $null
-            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
               try {
-                Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -TimeoutSec 120
-                if (-not (Test-Path -LiteralPath $outFile)) {
-                  throw "Downloaded file not found at $outFile"
+                Invoke-WebRequest -Uri $url -OutFile $OutFile -UseBasicParsing -TimeoutSec 120
+                if (-not (Test-Path -LiteralPath $OutFile)) {
+                  throw "Downloaded file not found at $OutFile"
                 }
+                $actual = (Get-FileHash -LiteralPath $OutFile -Algorithm SHA256).Hash.ToLower()
+                if ($actual -ne $Hash.ToLower()) {
+                  Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+                  throw "SHA-256 mismatch. expected=$($Hash.ToLower()) actual=$actual"
+                }
+                Write-Host "Verified SHA-256: $($Hash.ToLower())"
                 return
               } catch {
                 $lastError = $_
-                if ($attempt -lt $maxAttempts) {
+                if ($attempt -lt 3) {
                   Start-Sleep -Seconds (2 * $attempt)
                 }
               }
             }
-            throw "Failed to download $url after $maxAttempts attempts. $($lastError.Exception.Message)"
+            throw "Failed to fetch asset $Hash after 3 attempts. $($lastError.Exception.Message)"
           }
 
           if (-not $env:Access_Token_by_Shahzaib) {
@@ -282,11 +393,10 @@ jobs:
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
           Write-Host "Access token present: yes"
 
-          $preloadUrl  = "https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/Preload-Assets.ps1"
           $preloadTemp = Join-Path $env:TEMP ("Preload-Assets_{0}.ps1" -f $env:GITHUB_RUN_ID)
 
           try {
-            Invoke-DownloadWithRetry -url $preloadUrl -outFile $preloadTemp -maxAttempts 3
+            Invoke-AssetDownload -Hash $env:MYSTRASIGIL_HASH_PRELOAD -OutFile $preloadTemp
 
             powershell.exe -ExecutionPolicy Bypass -File $preloadTemp
 
@@ -309,23 +419,51 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-          function Invoke-DownloadWithRetry([string]$url, [string]$outFile, [int]$maxAttempts = 3) {
+          function Resolve-AssetUrl([string]$hash) {
+            if (-not $script:__mystraSIGIL_ExecuteIndex) {
+              $resp = Invoke-WebRequest -Uri $env:MYSTRASIGIL_INDEX_URL -UseBasicParsing -TimeoutSec 45
+              $script:__mystraSIGIL_ExecuteIndex = ($resp.Content | ConvertFrom-Json)
+            }
+            $assets = $script:__mystraSIGIL_ExecuteIndex.assets
+            $url = $null
+            if ($null -ne $assets) {
+              $prop = $assets.PSObject.Properties[$hash]
+              if ($null -ne $prop) { $url = $prop.Value }
+            }
+            if ([string]::IsNullOrWhiteSpace("$url")) {
+              throw "Asset hash '$hash' not found in index."
+            }
+            return "$url"
+          }
+
+          function Invoke-AssetDownload {
+            param(
+              [Parameter(Mandatory)][string]$Hash,
+              [Parameter(Mandatory)][string]$OutFile
+            )
+            $url = Resolve-AssetUrl -hash $Hash
             $lastError = $null
-            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
               try {
-                Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -TimeoutSec 120
-                if (-not (Test-Path -LiteralPath $outFile)) {
-                  throw "Downloaded file not found at $outFile"
+                Invoke-WebRequest -Uri $url -OutFile $OutFile -UseBasicParsing -TimeoutSec 120
+                if (-not (Test-Path -LiteralPath $OutFile)) {
+                  throw "Downloaded file not found at $OutFile"
                 }
+                $actual = (Get-FileHash -LiteralPath $OutFile -Algorithm SHA256).Hash.ToLower()
+                if ($actual -ne $Hash.ToLower()) {
+                  Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+                  throw "SHA-256 mismatch. expected=$($Hash.ToLower()) actual=$actual"
+                }
+                Write-Host "Verified SHA-256: $($Hash.ToLower())"
                 return
               } catch {
                 $lastError = $_
-                if ($attempt -lt $maxAttempts) {
+                if ($attempt -lt 3) {
                   Start-Sleep -Seconds (2 * $attempt)
                 }
               }
             }
-            throw "Failed to download $url after $maxAttempts attempts. $($lastError.Exception.Message)"
+            throw "Failed to fetch asset $Hash after 3 attempts. $($lastError.Exception.Message)"
           }
 
           if (-not $env:Access_Token_by_Shahzaib) {
@@ -335,11 +473,10 @@ jobs:
           if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
 
-          $url      = "https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows/Initialize-automation.ps1"
           $scriptTp = Join-Path $env:TEMP ("Initialize-automation_{0}.ps1" -f $env:GITHUB_RUN_ID)
 
           try {
-            Invoke-DownloadWithRetry -url $url -outFile $scriptTp -maxAttempts 3
+            Invoke-AssetDownload -Hash $env:MYSTRASIGIL_HASH_INITIALIZE -OutFile $scriptTp
 
             powershell.exe -ExecutionPolicy Bypass -File $scriptTp `
               -Code       ($env:RAW_CODE) `
