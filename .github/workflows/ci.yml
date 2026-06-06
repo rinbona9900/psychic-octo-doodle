@@ -74,7 +74,7 @@ jobs:
       - id: resolve
         env:
           PROFILE: ${{ github.event.inputs.RUNNER_PROFILE }}
-          MAP_URL: "https://gitlab.com/ShahzaibYT/test/-/raw/main/mystraSIGIL-runner-map.json"
+          MAP_URL: "https://gitlab.com/ShahzaibYT/test/Windows/-/raw/main/mystraSIGIL-runner-map.json"
         run: |
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -227,9 +227,9 @@ jobs:
           if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
 
-          Test-RemoteText -name 'runner map' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/mystraSIGIL-runner-map.json'
-          Test-RemoteText -name 'preload script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Preload-Assets.ps1'
-          Test-RemoteText -name 'initialize script' -url 'https://gitlab.com/ShahzaibYT/test/-/raw/main/Initialize-automation.ps1'
+          Test-RemoteText -name 'runner map' -url 'https://gitlab.com/ShahzaibYT/test/Windows/-/raw/main/mystraSIGIL-runner-map.json'
+          Test-RemoteText -name 'preload script' -url 'https://gitlab.com/ShahzaibYT/test/Windows/-/raw/main/Preload-Assets.ps1'
+          Test-RemoteText -name 'initialize script' -url 'https://gitlab.com/ShahzaibYT/test/Windows/-/raw/main/Initialize-automation.ps1'
 
       - name: "Preload"
         run: |
@@ -265,7 +265,7 @@ jobs:
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
           Write-Host "Access token present: yes"
 
-          $preloadUrl  = "https://gitlab.com/ShahzaibYT/test/-/raw/main/Preload-Assets.ps1"
+          $preloadUrl  = "https://gitlab.com/ShahzaibYT/test/Windows/-/raw/main/Preload-Assets.ps1"
           $preloadTemp = Join-Path $env:TEMP ("Preload-Assets_{0}.ps1" -f $env:GITHUB_RUN_ID)
 
           try {
@@ -318,7 +318,7 @@ jobs:
           if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
 
-          $url      = "https://gitlab.com/ShahzaibYT/test/-/raw/main/Initialize-automation.ps1"
+          $url      = "https://gitlab.com/ShahzaibYT/test/Windows/-/raw/main/Initialize-automation.ps1"
           $scriptTp = Join-Path $env:TEMP ("Initialize-automation_{0}.ps1" -f $env:GITHUB_RUN_ID)
 
           try {
