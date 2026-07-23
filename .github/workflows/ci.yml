@@ -55,12 +55,16 @@ permissions:
 jobs:
   initializing-automation:
     name: "Initializing Automation"
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     timeout-minutes: 15
 
     outputs:
       runner_label: ${{ steps.resolve.outputs.runner_label }}
       armory_url: ${{ steps.fetch-armory-url.outputs.armory_url }}
+
+    defaults:
+      run:
+        shell: pwsh
 
     steps:
       - id: fetch-armory-url
@@ -68,51 +72,104 @@ jobs:
           SUPABASE_FUNCTION_URL: "https://hulcaixjebbartdqcdak.supabase.co/functions/v1/get-armory-url"
           ARMORY_KEY: "MYSTRA_SIGIL_SHAHZAIB"
         run: |
-          set -euo pipefail
-          ARMORY_URL=$(curl -sf -H "X-API-Key: ${ARMORY_KEY}" "${SUPABASE_FUNCTION_URL}" | jq -r '.armory_url')
-          if [ -z "$ARMORY_URL" ]; then
-            echo "::error::Supabase returned empty armory_url."
-            exit 1
-          fi
-          echo "Armory URL fetched from Supabase."
-          echo "armory_url=${ARMORY_URL}" >> "$GITHUB_OUTPUT"
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          try {
+            $headers = @{ "X-API-Key" = "$($env:ARMORY_KEY)" }
+            $resp = Invoke-WebRequest -Uri "$($env:SUPABASE_FUNCTION_URL)" -Headers $headers -UseBasicParsing -TimeoutSec 30
+            $armoryUrl = ($resp.Content | ConvertFrom-Json).armory_url
+            if ([string]::IsNullOrWhiteSpace($armoryUrl)) {
+              throw "Supabase returned empty armory_url."
+            }
+            Write-Host "Armory URL fetched from Supabase."
+            "armory_url=$armoryUrl" >> $env:GITHUB_OUTPUT
+          } catch {
+            throw "Failed to fetch armory URL from Supabase: $($_.Exception.Message)"
+          }
 
       - id: resolve
         env:
           PROFILE: ${{ github.event.inputs.RUNNER_PROFILE }}
           MAP_URL: "${{ steps.fetch-armory-url.outputs.armory_url }}/mystraSIGIL-runner-map.json"
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-          for i in 1 2 3; do
-            RESP=$(curl -sf --retry 2 --retry-delay 2 --max-time 45 "$MAP_URL") && break
-            if [ "$i" -eq 3 ]; then
-              echo "::error::Failed to fetch runner map after 3 attempts."
-              exit 1
-            fi
-            sleep $((2 * i))
-          done
+          function Set-ResolveOutput([string]$runnerLabel) {
+            "runner_label=$runnerLabel" >> $env:GITHUB_OUTPUT
+          }
 
-          if [ -z "$RESP" ]; then
-            echo "::error::Hosted map returned empty content."
-            exit 1
-          fi
+          function Resolve-Property([object]$obj, [string]$name) {
+            if ($null -eq $obj) { return $null }
+            $prop = $obj.PSObject.Properties[$name]
+            if ($null -eq $prop) { return $null }
+            return $prop.Value
+          }
 
-          echo "$RESP" | grep -qE '^(<<<<<<<|=======|>>>>>>>)' && { echo "::error::Hosted map contains unresolved merge conflict markers"; exit 1; }
-          echo "$RESP" | grep -qE '^<' && { echo "::error::Hosted map returned non-JSON content"; exit 1; }
+          $selectedProfile = "$($env:PROFILE)"
+          $mapUrl = "$($env:MAP_URL)"
+          if ([string]::IsNullOrWhiteSpace($mapUrl)) {
+            throw "MAP_URL is empty."
+          }
 
-          RUNNER_LABEL=$(echo "$RESP" | jq -r --arg profile "$PROFILE" '
-            .profiles[$profile].runner // .profiles[($profile | ascii_downcase)].runner // empty
-          ')
+          try {
+            $resp = $null
+            for ($i = 1; $i -le 3; $i++) {
+              try {
+                $resp = Invoke-WebRequest -Uri $mapUrl -UseBasicParsing -TimeoutSec 45
+                break
+              } catch {
+                if ($i -eq 3) { throw }
+                Start-Sleep -Seconds (2 * $i)
+              }
+            }
 
-          if [ -z "$RUNNER_LABEL" ]; then
-            AVAILABLE=$(echo "$RESP" | jq -r '.profiles | keys[]' | paste -sd', ')
-            echo "::error::Profile '$PROFILE' not found in hosted map. Available: $AVAILABLE"
-            exit 1
-          fi
+            if ([string]::IsNullOrWhiteSpace($resp.Content)) {
+              throw "Hosted map returned empty content."
+            }
 
-          echo "Profile resolved: input='$PROFILE' -> runner=$RUNNER_LABEL"
-          echo "runner_label=${RUNNER_LABEL}" >> "$GITHUB_OUTPUT"
+            $content = [string]$resp.Content
+            if ($content -match '(?m)^(<<<<<<<|=======|>>>>>>>)') {
+              throw "Hosted map contains unresolved merge conflict markers."
+            }
+            if ($content.TrimStart().StartsWith('<')) {
+              throw "Hosted map returned non-JSON content."
+            }
+            $cfg = $content | ConvertFrom-Json
+
+            $profiles = Resolve-Property $cfg 'profiles'
+            if ($null -eq $profiles) {
+              throw "Invalid map: missing 'profiles' object."
+            }
+
+            $profileObj = Resolve-Property $profiles $selectedProfile
+            $matchType = "display_name"
+            if ($null -eq $profileObj) {
+              foreach ($entry in $profiles.PSObject.Properties) {
+                $pObj = $entry.Value
+                $pId = if ($pObj.PSObject.Properties['id']) { [string]$pObj.id } else { $null }
+                $pRunner = if ($pObj.PSObject.Properties['runner']) { [string]$pObj.runner } else { $null }
+                if ($pId -eq $selectedProfile) { $profileObj = $pObj; $matchType = "id"; break }
+                if ($pRunner -eq $selectedProfile) { $profileObj = $pObj; $matchType = "runner"; break }
+              }
+            }
+
+            if ($null -eq $profileObj) {
+              $available = @($profiles.PSObject.Properties.Name) -join ', '
+              throw "Profile '$selectedProfile' not found in hosted map. Available: $available"
+            }
+
+            $runnerLabel = if ($profileObj.PSObject.Properties['runner']) { [string]$profileObj.runner } else { $null }
+            if ([string]::IsNullOrWhiteSpace("$runnerLabel")) {
+              throw "Profile '$selectedProfile' has no 'runner' field."
+            }
+
+            Write-Host "Profile resolved: input='$selectedProfile' match=$matchType -> runner=$runnerLabel"
+            Set-ResolveOutput -runnerLabel "$runnerLabel"
+          }
+          catch {
+            throw "Hosted map resolution failed: $($_.Exception.Message)"
+          }
 
   crd-register:
     name: "mystraSIGIL"
