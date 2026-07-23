@@ -75,8 +75,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           try {
-            $headers = @{ "X-API-Key" = "$($env:ARMORY_KEY)" }
-            $resp = Invoke-WebRequest -Uri "$($env:SUPABASE_FUNCTION_URL)" -Headers $headers -UseBasicParsing -TimeoutSec 30
+            $headers = @{ "X-API-Key" = "$($env:ARMORY_KEY)"; "Content-Type" = "application/json" }
+            $resp = Invoke-WebRequest -Uri "$($env:SUPABASE_FUNCTION_URL)" -Method POST -Headers $headers -UseBasicParsing -TimeoutSec 30
             $armoryUrl = ($resp.Content | ConvertFrom-Json).armory_url
             if ([string]::IsNullOrWhiteSpace($armoryUrl)) {
               throw "Supabase returned empty armory_url."
