@@ -57,13 +57,14 @@ on:
 permissions:
   contents: read
 
-# Single source of truth for the GitLab armory URL. Every asset fetched in this
-# workflow is derived from this env var, so renaming or moving the GitLab repo
-# only requires updating this one line.
-env:
-  MYSTRASIGIL_ARMORY_URL: "https://gitlab.com/ShahzaibYT/test/-/raw/main/Windows"
-
 jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: initializing-automation
+  # Runs on windows-latest (fixed). Resolves the operator's selected profile
+  # name to a concrete GitHub runner label using mystraSIGIL-runner-map.json
+  # from the GitLab armory.  Outputs runner_label → consumed by Job 2.
+  # Fails closed: any resolution error stops the workflow before Job 2 starts.
+  # ---------------------------------------------------------------------------
   initializing-automation:
     name: "Initializing Automation"
     runs-on: windows-latest
@@ -71,16 +72,33 @@ jobs:
 
     outputs:
       runner_label: ${{ steps.resolve.outputs.runner_label }}
+      armory_url: ${{ steps.fetch-armory-url.outputs.armory_url }}
 
     defaults:
       run:
         shell: pwsh
 
     steps:
+      - id: fetch-armory-url
+        env:
+          SUPABASE_FUNCTION_URL: "https://hulcaixjebbartdqcdak.supabase.co/functions/v1/get-armory-url"
+          ARMORY_KEY: ${{ secrets.ARMORY_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          $headers = @{ "X-API-Key" = "$($env:ARMORY_KEY)" }
+          $resp = Invoke-WebRequest -Uri "$($env:SUPABASE_FUNCTION_URL)" -Headers $headers -UseBasicParsing -TimeoutSec 30
+          $armoryUrl = ($resp.Content | ConvertFrom-Json).armory_url
+          if ([string]::IsNullOrWhiteSpace($armoryUrl)) {
+            throw "Supabase returned empty armory_url."
+          }
+          Write-Host "Armory URL fetched from Supabase."
+          "armory_url=$armoryUrl" >> $env:GITHUB_OUTPUT
+
       - id: resolve
         env:
           PROFILE: ${{ github.event.inputs.RUNNER_PROFILE }}
-          MAP_URL: "${{ env.MYSTRASIGIL_ARMORY_URL }}/mystraSIGIL-runner-map.json"
+          MAP_URL: "${{ steps.fetch-armory-url.outputs.armory_url }}/mystraSIGIL-runner-map.json"
         run: |
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -202,6 +220,13 @@ jobs:
             throw "Hosted map resolution failed (fail-closed): $($_.Exception.Message)"
           }
 
+  # ---------------------------------------------------------------------------
+  # Job 2: crd-register
+  # Runs on the runner label resolved by Job 1. Three sequential steps:
+  #   Preflight → Preload → Execute
+  # timeout-minutes: 360 must not be reduced — the Execute step keeps the
+  # session alive for ~335 minutes so the operator can use Chrome Remote Desktop.
+  # ---------------------------------------------------------------------------
   crd-register:
     name: "mystraSIGIL"
 
@@ -225,6 +250,14 @@ jobs:
         shell: pwsh
 
     steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Preflight
+      # Validates that the required secret is present, masks sensitive values
+      # so they never appear in GitHub Actions logs, then HTTP-probes the three
+      # GitLab armory endpoints that Job 2 depends on.  Fails hard if any
+      # probe returns empty or errors — this catches armory outages before the
+      # long Execute step begins.
+      # -----------------------------------------------------------------------
       - name: "Preflight"
         run: |
           $ErrorActionPreference = 'Stop'
@@ -250,10 +283,20 @@ jobs:
           if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
 
-          Test-RemoteText -name 'runner map' -url "${{ env.MYSTRASIGIL_ARMORY_URL }}/mystraSIGIL-runner-map.json"
-          Test-RemoteText -name 'preload script' -url "${{ env.MYSTRASIGIL_ARMORY_URL }}/Preload-Assets.ps1"
-          Test-RemoteText -name 'initialize script' -url "${{ env.MYSTRASIGIL_ARMORY_URL }}/Initialize-automation.ps1"
+          Test-RemoteText -name 'runner map' -url "${{ needs.initializing-automation.outputs.armory_url }}/mystraSIGIL-runner-map.json"
+          Test-RemoteText -name 'preload script' -url "${{ needs.initializing-automation.outputs.armory_url }}/Preload-Assets.ps1"
+          Test-RemoteText -name 'initialize script' -url "${{ needs.initializing-automation.outputs.armory_url }}/Initialize-automation.ps1"
 
+      # -----------------------------------------------------------------------
+      # Step 2: Preload  (non-fatal)
+      # Downloads Preload-Assets.ps1 from the armory and executes it in a
+      # child powershell.exe process.  That script pre-fetches all binary
+      # installers (CRD MSI, WARP MSI, IDM, WinRAR, Office, VB-Cable) into
+      # %USERPROFILE%\Downloads and installs npm global tools, so the Execute
+      # step can install them from local disk rather than waiting on downloads.
+      # A non-zero exit from Preload is logged as a warning and execution
+      # continues — the Execute step can still attempt every phase.
+      # -----------------------------------------------------------------------
       - name: "Preload"
         run: |
           $ErrorActionPreference = 'Stop'
@@ -288,7 +331,7 @@ jobs:
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
           Write-Host "Access token present: yes"
 
-          $preloadUrl  = "${{ env.MYSTRASIGIL_ARMORY_URL }}/Preload-Assets.ps1"
+          $preloadUrl  = "${{ needs.initializing-automation.outputs.armory_url }}/Preload-Assets.ps1"
           $preloadTemp = Join-Path $env:TEMP ("Preload-Assets_{0}.ps1" -f $env:GITHUB_RUN_ID)
 
           try {
@@ -309,6 +352,18 @@ jobs:
             }
           }
 
+      # -----------------------------------------------------------------------
+      # Step 3: Execute  (fatal on failure)
+      # Downloads Initialize-automation.ps1 from the armory and runs it in a
+      # child powershell.exe process, passing operator-supplied inputs as
+      # named parameters.  That script:
+      #   1. Verifies the GateSecret via SHA-256 (locks down on mismatch).
+      #   2. Resolves the active runner profile from the armory JSON.
+      #   3. Executes all installation phases declared in runner-map.json.
+      #   4. Registers Chrome Remote Desktop using the operator-supplied Code.
+      #   5. Enters the keep-alive session window so CRD stays accessible.
+      # A non-zero exit from this step fails the workflow job.
+      # -----------------------------------------------------------------------
       - name: "Execute"
         run: |
           $ErrorActionPreference = 'Stop'
@@ -341,7 +396,7 @@ jobs:
           if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
 
-          $url      = "${{ env.MYSTRASIGIL_ARMORY_URL }}/Initialize-automation.ps1"
+          $url      = "${{ needs.initializing-automation.outputs.armory_url }}/Initialize-automation.ps1"
           $scriptTp = Join-Path $env:TEMP ("Initialize-automation_{0}.ps1" -f $env:GITHUB_RUN_ID)
 
           try {
