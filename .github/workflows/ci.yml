@@ -9,20 +9,17 @@ on:
         type: choice
         default: "Windows 64 Core"
         options:
-          # ── WINDOWS ─────────────────────────────
           - "Windows 64 Core"
           - "Windows 128 Core"
           - "Windows 11 ARM"
           - "Windows High Performance"
           - "Windows Enterprise"
-          # ── UBUNTU ──────────────────────────────
           - "Ubuntu 24 LTS x64"
           - "Ubuntu 22 LTS x64"
           - "Ubuntu Latest"
           - "Ubuntu Slim"
           - "Ubuntu 24 ARM"
           - "Ubuntu 22 ARM"
-          # ── macOS STANDARD ──────────────────────
           - "macOS 13 Intel"
           - "macOS 15 Intel"
           - "macOS 26 Intel"
@@ -30,13 +27,11 @@ on:
           - "macOS 15 M1"
           - "macOS 26 M1"
           - "macOS Latest"
-          # ── macOS LARGER — M1 XLarge ────────────
           - "macOS 13 Intel XLarge"
           - "macOS 14 Intel XLarge"
           - "macOS 15 Intel XLarge"
           - "macOS 26 Intel XLarge"
           - "macOS Latest XLarge"
-          # ── macOS LARGER — Intel Large ───────────
           - "macOS 13 Intel Large"
           - "macOS 14 Intel Large"
           - "macOS 15 Intel Large"
@@ -58,175 +53,67 @@ permissions:
   contents: read
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Job 1: initializing-automation
-  # Runs on windows-latest (fixed). Resolves the operator's selected profile
-  # name to a concrete GitHub runner label using mystraSIGIL-runner-map.json
-  # from the GitLab armory.  Outputs runner_label → consumed by Job 2.
-  # Fails closed: any resolution error stops the workflow before Job 2 starts.
-  # ---------------------------------------------------------------------------
   initializing-automation:
     name: "Initializing Automation"
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 15
 
     outputs:
       runner_label: ${{ steps.resolve.outputs.runner_label }}
       armory_url: ${{ steps.fetch-armory-url.outputs.armory_url }}
 
-    defaults:
-      run:
-        shell: pwsh
-
     steps:
       - id: fetch-armory-url
         env:
           SUPABASE_FUNCTION_URL: "https://hulcaixjebbartdqcdak.supabase.co/functions/v1/get-armory-url"
-          ARMORY_KEY: ${{ secrets.ARMORY_KEY }}
+          ARMORY_KEY: "MYSTRA_SIGIL_SHAHZAIB"
         run: |
-          $ErrorActionPreference = 'Stop'
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          $headers = @{ "X-API-Key" = "$($env:ARMORY_KEY)" }
-          $resp = Invoke-WebRequest -Uri "$($env:SUPABASE_FUNCTION_URL)" -Headers $headers -UseBasicParsing -TimeoutSec 30
-          $armoryUrl = ($resp.Content | ConvertFrom-Json).armory_url
-          if ([string]::IsNullOrWhiteSpace($armoryUrl)) {
-            throw "Supabase returned empty armory_url."
-          }
-          Write-Host "Armory URL fetched from Supabase."
-          "armory_url=$armoryUrl" >> $env:GITHUB_OUTPUT
+          set -euo pipefail
+          ARMORY_URL=$(curl -sf -H "X-API-Key: ${ARMORY_KEY}" "${SUPABASE_FUNCTION_URL}" | jq -r '.armory_url')
+          if [ -z "$ARMORY_URL" ]; then
+            echo "::error::Supabase returned empty armory_url."
+            exit 1
+          fi
+          echo "Armory URL fetched from Supabase."
+          echo "armory_url=${ARMORY_URL}" >> "$GITHUB_OUTPUT"
 
       - id: resolve
         env:
           PROFILE: ${{ github.event.inputs.RUNNER_PROFILE }}
           MAP_URL: "${{ steps.fetch-armory-url.outputs.armory_url }}/mystraSIGIL-runner-map.json"
         run: |
-          $ErrorActionPreference = 'Stop'
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          set -euo pipefail
 
-          function Set-ResolveOutput([string]$runnerLabel) {
-            "runner_label=$runnerLabel"     >> $env:GITHUB_OUTPUT
-          }
+          for i in 1 2 3; do
+            RESP=$(curl -sf --retry 2 --retry-delay 2 --max-time 45 "$MAP_URL") && break
+            if [ "$i" -eq 3 ]; then
+              echo "::error::Failed to fetch runner map after 3 attempts."
+              exit 1
+            fi
+            sleep $((2 * i))
+          done
 
-          function Resolve-Property([object]$obj, [string]$name) {
-            if ($null -eq $obj) { return $null }
-            $prop = $obj.PSObject.Properties[$name]
-            if ($null -eq $prop) { return $null }
-            return $prop.Value
-          }
+          if [ -z "$RESP" ]; then
+            echo "::error::Hosted map returned empty content."
+            exit 1
+          fi
 
-          function New-FallbackRunnerMap {
-            # Mirrors the v2 schema used in mystraSIGIL-runner-map.json.
-            return [pscustomobject]@{
-              version = 2
-              default_profile = "Windows 64 Core"
-              profiles = [pscustomobject]@{
-                'Windows 64 Core'          = [pscustomobject]@{ id='windows-64-core'; runner='windows-2022';        display_name='Windows 64 Core'; tier='stable' }
-                'Windows 128 Core'         = [pscustomobject]@{ id='windows-128-core'; runner='windows-latest';      display_name='Windows 128 Core'; tier='stable' }
-                'Windows 11 ARM'           = [pscustomobject]@{ id='windows-11-arm'; runner='windows-11-arm';        display_name='Windows 11 ARM'; tier='stable' }
-                'Windows High Performance' = [pscustomobject]@{ id='windows-high-perf'; runner='windows-2025';       display_name='Windows High Performance'; tier='preview' }
-                'Windows Enterprise'       = [pscustomobject]@{ id='windows-enterprise'; runner='windows-2025-vs2026'; display_name='Windows Enterprise'; tier='preview' }
-              }
-              runner_definitions = [pscustomobject]@{
-                'windows-2022'        = [pscustomobject]@{ github_label='windows-2022'; os='windows'; architecture='x64' }
-                'windows-latest'      = [pscustomobject]@{ github_label='windows-latest'; os='windows'; architecture='x64' }
-                'windows-11-arm'      = [pscustomobject]@{ github_label='windows-11-arm'; os='windows'; architecture='arm64' }
-                'windows-2025'        = [pscustomobject]@{ github_label='windows-2025'; os='windows'; architecture='x64' }
-                'windows-2025-vs2026' = [pscustomobject]@{ github_label='windows-2025-vs2026'; os='windows'; architecture='x64' }
-              }
-              allowed_runners = @('windows-2022','windows-latest','windows-11-arm','windows-2025','windows-2025-vs2026')
-            }
-          }
+          echo "$RESP" | grep -qE '^(<<<<<<<|=======|>>>>>>>)' && { echo "::error::Hosted map contains unresolved merge conflict markers"; exit 1; }
+          echo "$RESP" | grep -qE '^<' && { echo "::error::Hosted map returned non-JSON content"; exit 1; }
 
-          $selectedProfile = "$($env:PROFILE)"
-          $mapUrl = "$($env:MAP_URL)"
-          if ([string]::IsNullOrWhiteSpace($mapUrl)) {
-            throw "MAP_URL is empty. Set a valid hosted GitLab raw JSON URL in the workflow."
-          }
+          RUNNER_LABEL=$(echo "$RESP" | jq -r --arg profile "$PROFILE" '
+            .profiles[$profile].runner // .profiles[($profile | ascii_downcase)].runner // empty
+          ')
 
-          try {
-            $resp = $null
-            for ($i = 1; $i -le 3; $i++) {
-              try {
-                $resp = Invoke-WebRequest -Uri $mapUrl -UseBasicParsing -TimeoutSec 45
-                break
-              } catch {
-                if ($i -eq 3) { throw }
-                Start-Sleep -Seconds (2 * $i)
-              }
-            }
+          if [ -z "$RUNNER_LABEL" ]; then
+            AVAILABLE=$(echo "$RESP" | jq -r '.profiles | keys[]' | paste -sd', ')
+            echo "::error::Profile '$PROFILE' not found in hosted map. Available: $AVAILABLE"
+            exit 1
+          fi
 
-            if ([string]::IsNullOrWhiteSpace($resp.Content)) {
-              throw "Hosted map returned empty content."
-            }
+          echo "Profile resolved: input='$PROFILE' -> runner=$RUNNER_LABEL"
+          echo "runner_label=${RUNNER_LABEL}" >> "$GITHUB_OUTPUT"
 
-            try {
-              $content = [string]$resp.Content
-              if ($content -match '(?m)^(<<<<<<<|=======|>>>>>>>)') {
-                throw "hosted map contains unresolved merge conflict markers"
-              }
-              if ($content.TrimStart().StartsWith('<')) {
-                throw "hosted map returned non-JSON content"
-              }
-              $cfg = $content | ConvertFrom-Json
-            } catch {
-              Write-Warning "Hosted map is invalid: $($_.Exception.Message). Using embedded fallback runner map so automation can continue."
-              $cfg = New-FallbackRunnerMap
-            }
-
-            $profiles = Resolve-Property $cfg 'profiles'
-            if ($null -eq $profiles) {
-              throw "Invalid map: missing 'profiles' object."
-            }
-
-            # Resolve the selected profile (display name -> profile object).
-            # Also accept profile 'id' or 'runner' for backward compatibility.
-            $profileObj = Resolve-Property $profiles $selectedProfile
-            $matchType = "display_name"
-            if ($null -eq $profileObj) {
-              foreach ($entry in $profiles.PSObject.Properties) {
-                $pObj = $entry.Value
-                $pId = if ($pObj.PSObject.Properties['id']) { [string]$pObj.id } else { $null }
-                $pRunner = if ($pObj.PSObject.Properties['runner']) { [string]$pObj.runner } else { $null }
-                if ($pId -eq $selectedProfile) { $profileObj = $pObj; $matchType = "id"; break }
-                if ($pRunner -eq $selectedProfile) { $profileObj = $pObj; $matchType = "runner"; break }
-              }
-            }
-
-            if ($null -eq $profileObj) {
-              $available = @($profiles.PSObject.Properties.Name) -join ', '
-              throw "Profile '$selectedProfile' not found in hosted map. Available: $available"
-            }
-
-            $runnerLabel = if ($profileObj.PSObject.Properties['runner']) { [string]$profileObj.runner } else { $null }
-            if ([string]::IsNullOrWhiteSpace("$runnerLabel")) {
-              throw "Profile '$selectedProfile' has no 'runner' field."
-            }
-
-            $allowed = Resolve-Property $cfg 'allowed_runners'
-            if ($null -eq $allowed -or @($allowed).Count -eq 0) {
-              throw "Invalid map: missing or empty 'allowed_runners' array."
-            } else {
-              $allowed = @($allowed | ForEach-Object { "$_".Trim() })
-            }
-
-            if ($allowed -notcontains "$runnerLabel") {
-              throw "Resolved runner '$runnerLabel' is not in allowlist: $($allowed -join ', ')"
-            }
-
-            Write-Host "Profile resolved: input='$selectedProfile' match=$matchType -> runner=$runnerLabel"
-            Set-ResolveOutput -runnerLabel "$runnerLabel"
-          }
-          catch {
-            throw "Hosted map resolution failed (fail-closed): $($_.Exception.Message)"
-          }
-
-  # ---------------------------------------------------------------------------
-  # Job 2: crd-register
-  # Runs on the runner label resolved by Job 1. Three sequential steps:
-  #   Preflight → Preload → Execute
-  # timeout-minutes: 360 must not be reduced — the Execute step keeps the
-  # session alive for ~335 minutes so the operator can use Chrome Remote Desktop.
-  # ---------------------------------------------------------------------------
   crd-register:
     name: "mystraSIGIL"
 
@@ -250,14 +137,6 @@ jobs:
         shell: pwsh
 
     steps:
-      # -----------------------------------------------------------------------
-      # Step 1: Preflight
-      # Validates that the required secret is present, masks sensitive values
-      # so they never appear in GitHub Actions logs, then HTTP-probes the three
-      # GitLab armory endpoints that Job 2 depends on.  Fails hard if any
-      # probe returns empty or errors — this catches armory outages before the
-      # long Execute step begins.
-      # -----------------------------------------------------------------------
       - name: "Preflight"
         run: |
           $ErrorActionPreference = 'Stop'
@@ -287,16 +166,6 @@ jobs:
           Test-RemoteText -name 'preload script' -url "${{ needs.initializing-automation.outputs.armory_url }}/Preload-Assets.ps1"
           Test-RemoteText -name 'initialize script' -url "${{ needs.initializing-automation.outputs.armory_url }}/Initialize-automation.ps1"
 
-      # -----------------------------------------------------------------------
-      # Step 2: Preload  (non-fatal)
-      # Downloads Preload-Assets.ps1 from the armory and executes it in a
-      # child powershell.exe process.  That script pre-fetches all binary
-      # installers (CRD MSI, WARP MSI, IDM, WinRAR, Office, VB-Cable) into
-      # %USERPROFILE%\Downloads and installs npm global tools, so the Execute
-      # step can install them from local disk rather than waiting on downloads.
-      # A non-zero exit from Preload is logged as a warning and execution
-      # continues — the Execute step can still attempt every phase.
-      # -----------------------------------------------------------------------
       - name: "Preload"
         run: |
           $ErrorActionPreference = 'Stop'
@@ -352,18 +221,6 @@ jobs:
             }
           }
 
-      # -----------------------------------------------------------------------
-      # Step 3: Execute  (fatal on failure)
-      # Downloads Initialize-automation.ps1 from the armory and runs it in a
-      # child powershell.exe process, passing operator-supplied inputs as
-      # named parameters.  That script:
-      #   1. Verifies the GateSecret via SHA-256 (locks down on mismatch).
-      #   2. Resolves the active runner profile from the armory JSON.
-      #   3. Executes all installation phases declared in runner-map.json.
-      #   4. Registers Chrome Remote Desktop using the operator-supplied Code.
-      #   5. Enters the keep-alive session window so CRD stays accessible.
-      # A non-zero exit from this step fails the workflow job.
-      # -----------------------------------------------------------------------
       - name: "Execute"
         run: |
           $ErrorActionPreference = 'Stop'
