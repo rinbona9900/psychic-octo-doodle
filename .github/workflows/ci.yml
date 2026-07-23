@@ -77,6 +77,8 @@ jobs:
           try {
             $headers = @{ "X-API-Key" = "$($env:ARMORY_KEY)"; "Content-Type" = "application/json" }
             $resp = Invoke-WebRequest -Uri "$($env:SUPABASE_FUNCTION_URL)" -Method POST -Headers $headers -UseBasicParsing -TimeoutSec 30
+            Write-Host "Status: $($resp.StatusCode)"
+            Write-Host "Response: $($resp.Content)"
             $armoryUrl = ($resp.Content | ConvertFrom-Json).armory_url
             if ([string]::IsNullOrWhiteSpace($armoryUrl)) {
               throw "Supabase returned empty armory_url."
@@ -84,6 +86,12 @@ jobs:
             Write-Host "Armory URL fetched from Supabase."
             "armory_url=$armoryUrl" >> $env:GITHUB_OUTPUT
           } catch {
+            if ($_.Exception.Response) {
+              $reader = [System.IO.StreamReader]::new($_.Exception.Response.GetResponseStream())
+              $body = $reader.ReadToEnd()
+              Write-Host "Error Status: $($_.Exception.Response.StatusCode)"
+              Write-Host "Error Body: $body"
+            }
             throw "Failed to fetch armory URL from Supabase: $($_.Exception.Message)"
           }
 
