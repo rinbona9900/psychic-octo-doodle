@@ -1,0 +1,237 @@
+name: Magnet to Artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner OS"
+        type: choice
+        required: true
+        default: windows-latest
+        options:
+          - ubuntu-latest
+          - windows-latest
+      magnet_link:
+        description: "Authorized magnet URI"
+        required: true
+        type: string
+      artifact_name:
+        description: "Artifact name override (use auto for detected name)"
+        required: false
+        default: auto
+        type: string
+      timeout_minutes:
+        description: "Download timeout (minutes)"
+        required: false
+        default: "300"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  download-and-upload:
+    name: Download + Upload Artifact
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+
+    steps:
+      - name: Initialize compact progress summary
+        shell: bash
+        run: |
+          {
+            echo "## Transfer Progress"
+            echo "- Download: \`[----------] 0%\`"
+            echo "- Upload: \`[----------] 0%\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate magnet link
+        shell: bash
+        run: |
+          if [[ ! "${{ inputs.magnet_link }}" =~ ^magnet:\? ]]; then
+            echo "Input does not look like a valid magnet URI."
+            exit 1
+          fi
+
+      - name: Prepare directories
+        shell: bash
+        run: |
+          mkdir -p "downloads/${{ github.run_id }}"
+          mkdir -p temp
+          rm -f temp/dht.dat temp/dht6.dat
+
+      - name: Write runtime vars
+        id: vars
+        shell: bash
+        run: |
+          echo "download_dir=downloads/${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+
+      - name: Install aria2 (Ubuntu)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y aria2
+
+      - name: Install aria2 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command aria2c -ErrorAction SilentlyContinue)) {
+            choco install aria2 -y --no-progress
+          }
+
+      - name: Download from magnet (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          rm -f ~/.cache/aria2/dht.dat ~/.cache/aria2/dht6.dat || true
+          aria2c \
+            --enable-dht=true \
+            --bt-enable-lpd=true \
+            --bt-save-metadata=true \
+            --bt-remove-unselected-file=true \
+            --seed-time=0 \
+            --max-tries=0 \
+            --retry-wait=5 \
+            --connect-timeout=20 \
+            --timeout=60 \
+            --summary-interval=0 \
+            --show-console-readout=true \
+            --console-log-level=notice \
+            --download-result=hide \
+            --dht-file-path=temp/dht.dat \
+            --dht-file-path6=temp/dht6.dat \
+            --continue=true \
+            --dir="${{ steps.vars.outputs.download_dir }}" \
+            "${{ inputs.magnet_link }}"
+
+      - name: Download from magnet (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Remove-Item "$env:USERPROFILE\.cache\aria2\dht.dat" -ErrorAction SilentlyContinue
+          Remove-Item "$env:USERPROFILE\.cache\aria2\dht6.dat" -ErrorAction SilentlyContinue
+          aria2c `
+            --enable-dht=true `
+            --bt-enable-lpd=true `
+            --bt-save-metadata=true `
+            --bt-remove-unselected-file=true `
+            --seed-time=0 `
+            --max-tries=0 `
+            --retry-wait=5 `
+            --connect-timeout=20 `
+            --timeout=60 `
+            --summary-interval=0 `
+            --show-console-readout=true `
+            --console-log-level=notice `
+            --download-result=hide `
+            --dht-file-path=temp/dht.dat `
+            --dht-file-path6=temp/dht6.dat `
+            --continue=true `
+            --dir="${{ steps.vars.outputs.download_dir }}" `
+            "${{ inputs.magnet_link }}"
+
+      - name: Mark download progress complete
+        shell: bash
+        run: |
+          {
+            echo "- Download: \`[##########] 100%\`"
+            echo "- Upload: \`[#####-----] 50%\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify downloaded files exist
+        id: verify
+        shell: bash
+        run: |
+          shopt -s nullglob globstar
+          files=("${{ steps.vars.outputs.download_dir }}"/**)
+          count=0
+          for f in "${files[@]}"; do
+            if [[ -f "$f" ]]; then
+              count=$((count + 1))
+            fi
+          done
+          echo "file_count=$count" >> "$GITHUB_OUTPUT"
+          if [[ "$count" -eq 0 ]]; then
+            echo "No files were downloaded."
+            exit 1
+          fi
+
+      - name: Detect artifact name from downloaded payload
+        id: artifact_name
+        shell: bash
+        run: |
+          dir="${{ steps.vars.outputs.download_dir }}"
+          shopt -s nullglob dotglob globstar
+
+          entries=("$dir"/*)
+          if [[ ${#entries[@]} -eq 0 ]]; then
+            echo "Unable to detect downloaded payload name."
+            exit 1
+          fi
+
+          detected=""
+          if [[ ${#entries[@]} -eq 1 ]]; then
+            detected="$(basename "${entries[0]}")"
+          else
+            largest_file=""
+            largest_size=0
+            for f in "$dir"/**; do
+              if [[ -f "$f" ]]; then
+                size=$(wc -c < "$f" | tr -d '[:space:]')
+                if [[ "$size" -gt "$largest_size" ]]; then
+                  largest_size="$size"
+                  largest_file="$f"
+                fi
+              fi
+            done
+
+            if [[ -n "$largest_file" ]]; then
+              detected="$(basename "$largest_file")"
+              detected="${detected%.*}"
+            else
+              detected="download-${{ github.run_id }}"
+            fi
+          fi
+
+          cleaned="$(printf '%s' "$detected" | sed -E 's/[[:space:]]+/ /g; s/[^A-Za-z0-9._ -]+/-/g; s/^ +| +$//g')"
+          if [[ -z "$cleaned" ]]; then
+            cleaned="download-${{ github.run_id }}"
+          fi
+
+          cleaned="${cleaned:0:120}"
+          final_name="$cleaned"
+          if [[ "${{ inputs.artifact_name }}" != "" && "${{ inputs.artifact_name }}" != "auto" ]]; then
+            override="$(printf '%s' "${{ inputs.artifact_name }}" | sed -E 's/[[:space:]]+/ /g; s/[^A-Za-z0-9._ -]+/-/g; s/^ +| +$//g')"
+            if [[ -n "$override" ]]; then
+              final_name="$override"
+            fi
+          fi
+
+          final_name="${final_name:0:120}"
+          echo "name=${final_name}-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          echo "detected=$cleaned" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact_name.outputs.name }}
+          path: ${{ steps.vars.outputs.download_dir }}/**
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Mark upload complete
+        shell: bash
+        run: echo "Upload completed by upload-artifact step." 
+
+      - name: Final compact summary
+        shell: bash
+        run: |
+          echo "- Upload: \`[##########] 100%\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Detected name: \`${{ steps.artifact_name.outputs.detected }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Artifact: \`${{ steps.artifact_name.outputs.name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Artifact URL: ${{ steps.upload.outputs.artifact-url }}" >> "$GITHUB_STEP_SUMMARY"
