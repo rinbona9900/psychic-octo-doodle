@@ -69,31 +69,18 @@ jobs:
     steps:
       - id: fetch-armory-url
         env:
-          SUPABASE_FUNCTION_URL: "https://hulcaixjebbartdqcdak.supabase.co/functions/v1/get-armory-url"
-          ARMORY_KEY: "MYSTRA_SIGIL_SHAHZAIB"
+          SUPABASE_URL: "https://hulcaixjebbartdqcdak.supabase.co"
+          SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh1bGNhaXhlYmJhcnRxY2RhayIsInJvbGUiOiJhbm9uIiwiaWF0IjoxNzUzMTkzNDk3LCJleHAiOjIwNjg3Njk0OTd9.JkCqjPbKjN4lOsLhKqfQxNwVqR8xLqYzFvGpHdSnOYk"
         run: |
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          try {
-            $headers = @{ "X-API-Key" = "$($env:ARMORY_KEY)"; "Content-Type" = "application/json" }
-            $resp = Invoke-WebRequest -Uri "$($env:SUPABASE_FUNCTION_URL)" -Method POST -Headers $headers -UseBasicParsing -TimeoutSec 30
-            Write-Host "Status: $($resp.StatusCode)"
-            Write-Host "Response: $($resp.Content)"
-            $armoryUrl = ($resp.Content | ConvertFrom-Json).armory_url
-            if ([string]::IsNullOrWhiteSpace($armoryUrl)) {
-              throw "Supabase returned empty armory_url."
-            }
-            Write-Host "Armory URL fetched from Supabase."
-            "armory_url=$armoryUrl" >> $env:GITHUB_OUTPUT
-          } catch {
-            if ($_.Exception.Response) {
-              $reader = [System.IO.StreamReader]::new($_.Exception.Response.GetResponseStream())
-              $body = $reader.ReadToEnd()
-              Write-Host "Error Status: $($_.Exception.Response.StatusCode)"
-              Write-Host "Error Body: $body"
-            }
-            throw "Failed to fetch armory URL from Supabase: $($_.Exception.Message)"
-          }
+          $headers = @{ "apikey" = "$($env:SUPABASE_ANON_KEY)"; "Authorization" = "Bearer $($env:SUPABASE_ANON_KEY)" }
+          $resp = Invoke-RestMethod -Uri "$($env:SUPABASE_URL)/rest/v1/config?key=eq.armory_url&select=value" -Headers $headers -TimeoutSec 30
+          if ($resp.Count -eq 0) { throw "No armory_url found." }
+          $armoryUrl = $resp[0].value
+          if ([string]::IsNullOrWhiteSpace($armoryUrl)) { throw "armory_url is empty." }
+          Write-Host "Armory URL fetched from Supabase."
+          "armory_url=$armoryUrl" >> $env:GITHUB_OUTPUT
 
       - id: resolve
         env:
