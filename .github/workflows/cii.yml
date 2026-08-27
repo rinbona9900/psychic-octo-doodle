@@ -33,7 +33,7 @@ jobs:
       RETRIES_INPUT: ${{ github.event.inputs.RETRIES }}
       BRANCH:        ${{ github.ref_name }}
       RUNNER_ENV:    "hosted"
-      EnigMano_Access_Token: ${{ secrets.EnigMano_Access_Token }}
+      MystraSiGiL_Access_Token: ${{ secrets.MystraSiGiL_Access_Token }}
 
     defaults:
       run:
@@ -57,11 +57,11 @@ jobs:
           if ($env:RAW_CODE)  { Write-Host "::add-mask::$($env:RAW_CODE)" }
           if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
 
-          if (-not $env:EnigMano_Access_Token) {
-            Write-Error "❌ Missing required repository secret: EnigMano_Access_Token"
+          if (-not $env:MystraSiGiL_Access_Token) {
+            Write-Error "❌ Missing required repository secret: MystraSiGiL_Access_Token"
             exit 1
           }
-          Write-Host "::add-mask::$($env:EnigMano_Access_Token)"
+          Write-Host "::add-mask::$($env:MystraSiGiL_Access_Token)"
           Write-Host "🔐 Gate secret present: yes"
 
           try {
@@ -124,7 +124,7 @@ jobs:
               -Code       ($env:RAW_CODE) `
               -Pin        ($env:PIN_INPUT) `
               -Retries    ($env:RETRIES_INPUT) `
-              -GateSecret ($env:EnigMano_Access_Token)
+              -GateSecret ($env:MystraSiGiL_Access_Token)
               
             Write-Host "==============================================="
             Write-Host "🪄 EnigMano Windows 10 (Sound Enabled)"
