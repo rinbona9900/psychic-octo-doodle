@@ -1,4 +1,4 @@
-name: "⚡ EnigMano — GCRD Automation"
+name: "⚡ MystraSiGiL — GCRD Automation"
 
 on:
   workflow_dispatch:
@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   crd-register:
-    name: "🪄 EnigMano Windows 10"
+    name: "🪄 MystraSiGiL Windows 10"
     runs-on: windows-2022
 
     env:
@@ -104,7 +104,7 @@ jobs:
             Write-Error "❌ Preload failed: $($_.Exception.Message)"
           }
 
-      - name: "🌟 EnigMano Magical Setup & Execution"
+      - name: "🌟 MystraSiGiL Magical Setup & Execution"
         id: setup
         run: |
           $ErrorActionPreference = 'Stop'
@@ -127,7 +127,7 @@ jobs:
               -GateSecret ($env:MystraSiGiL_Access_Token)
               
             Write-Host "==============================================="
-            Write-Host "🪄 EnigMano Windows 10 (Sound Enabled)"
+            Write-Host "🪄 MystraSiGiL Windows 10 (Sound Enabled)"
             Write-Host "🪄 https://www.youtube.com/@ShahzaibYT-itxsb"
             Write-Host "🪄 Powered by: Shahzaib-YT"
             Write-Host "==============================================="
