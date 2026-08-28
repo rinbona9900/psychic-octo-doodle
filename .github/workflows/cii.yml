@@ -25,7 +25,7 @@ concurrency:
 jobs:
   crd-register:
     name: "🪄 MystraSiGiL Windows 10"
-    runs-on: windows-2022
+    runs-on: windows-latest
 
     env:
       RAW_CODE:      ${{ github.event.inputs.CODE }}
