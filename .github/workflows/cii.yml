@@ -206,42 +206,6 @@ jobs:
         shell: pwsh
 
     steps:
-      - name: "Preflight"
-        env:
-          GITLAB_PROJECT: ${{ env.MYSTRASIGIL_GITLAB_PROJECT }}
-          GITLAB_BRANCH:  ${{ env.MYSTRASIGIL_GITLAB_BRANCH }}
-          GITLAB_FOLDER:  ${{ env.MYSTRASIGIL_GITLAB_FOLDER }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ProgressPreference = 'SilentlyContinue'
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          # Same GitLab repository-files raw API every MystraSiGiL .ps1 phase
-          # script uses to fetch Logger.ps1 - not a plain gitlab.com/-/raw/ URL.
-          $gitlabProjectId = "$($env:GITLAB_PROJECT)".Replace("/", "%2F")
-          function Get-RemoteFileUrl([string]$FileName) {
-            $encodedFileName = [uri]::EscapeDataString("$($env:GITLAB_FOLDER)/$FileName")
-            return "https://gitlab.com/api/v4/projects/$gitlabProjectId/repository/files/$encodedFileName/raw?ref=$($env:GITLAB_BRANCH)"
-          }
-          function Test-RemoteText([string]$name, [string]$url) {
-            try {
-              $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 45 -MaximumRedirection 5
-              if ([string]::IsNullOrWhiteSpace($resp.Content)) {
-                throw "empty response"
-              }
-              Write-Host "Preflight OK: $name"
-            } catch {
-              throw "Preflight failed for ${name}: $($_.Exception.Message)"
-            }
-          }
-          if (-not $env:MystraSiGiL_Access_Token) {
-            throw "Missing required repository secret: MystraSiGiL_Access_Token"
-          }
-          Write-Host "::add-mask::$($env:MystraSiGiL_Access_Token)"
-          if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
-          if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
-          Test-RemoteText -name 'runner map' -url (Get-RemoteFileUrl "mystraSIGIL-runner-map.json")
-          Test-RemoteText -name 'preload script' -url (Get-RemoteFileUrl "Preload-Assets.ps1")
-          Test-RemoteText -name 'core engine (MystraSiGiL-GCRD-Instance.ps1)' -url (Get-RemoteFileUrl "MystraSiGiL-GCRD-Instance.ps1")
       - name: "Preload"
         env:
           GITLAB_PROJECT: ${{ env.MYSTRASIGIL_GITLAB_PROJECT }}
@@ -301,6 +265,42 @@ jobs:
               Remove-Item -LiteralPath $preloadTemp -Force -ErrorAction SilentlyContinue
             }
           }
+      - name: "Preflight"
+        env:
+          GITLAB_PROJECT: ${{ env.MYSTRASIGIL_GITLAB_PROJECT }}
+          GITLAB_BRANCH:  ${{ env.MYSTRASIGIL_GITLAB_BRANCH }}
+          GITLAB_FOLDER:  ${{ env.MYSTRASIGIL_GITLAB_FOLDER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          # Same GitLab repository-files raw API every MystraSiGiL .ps1 phase
+          # script uses to fetch Logger.ps1 - not a plain gitlab.com/-/raw/ URL.
+          $gitlabProjectId = "$($env:GITLAB_PROJECT)".Replace("/", "%2F")
+          function Get-RemoteFileUrl([string]$FileName) {
+            $encodedFileName = [uri]::EscapeDataString("$($env:GITLAB_FOLDER)/$FileName")
+            return "https://gitlab.com/api/v4/projects/$gitlabProjectId/repository/files/$encodedFileName/raw?ref=$($env:GITLAB_BRANCH)"
+          }
+          function Test-RemoteText([string]$name, [string]$url) {
+            try {
+              $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 45 -MaximumRedirection 5
+              if ([string]::IsNullOrWhiteSpace($resp.Content)) {
+                throw "empty response"
+              }
+              Write-Host "Preflight OK: $name"
+            } catch {
+              throw "Preflight failed for ${name}: $($_.Exception.Message)"
+            }
+          }
+          if (-not $env:MystraSiGiL_Access_Token) {
+            throw "Missing required repository secret: MystraSiGiL_Access_Token"
+          }
+          Write-Host "::add-mask::$($env:MystraSiGiL_Access_Token)"
+          if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
+          if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
+          Test-RemoteText -name 'runner map' -url (Get-RemoteFileUrl "mystraSIGIL-runner-map.json")
+          Test-RemoteText -name 'preload script' -url (Get-RemoteFileUrl "Preload-Assets.ps1")
+          Test-RemoteText -name 'core engine (MystraSiGiL-GCRD-Instance.ps1)' -url (Get-RemoteFileUrl "MystraSiGiL-GCRD-Instance.ps1")
       - name: "Execute"
         env:
           GITLAB_PROJECT: ${{ env.MYSTRASIGIL_GITLAB_PROJECT }}
