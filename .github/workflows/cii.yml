@@ -1,31 +1,204 @@
-name: "⚡ MystraSiGiL — GCRD Automation"
+name: "⚡🔐✋ mystraSIGIL - A Virtual Fortress"
 
 on:
   workflow_dispatch:
     inputs:
+      RUNNER_PROFILE:
+        description: "Select Profile (display names; runner mappings are resolved from mystraSIGIL-runner-map.json)"
+        required: true
+        type: choice
+        default: "Windows 64 Core"
+        options:
+          # ── WINDOWS ─────────────────────────────
+          - "Windows 64 Core"
+          - "Windows 128 Core"
+          - "Windows 11 ARM"
+          - "Windows High Performance"
+          - "Windows Enterprise"
+          - "Windows ARM Enterprise"
       CODE:
-        description: "Full headless command or just the 4/... token from https://remotedesktop.google.com/headless (Windows)."
+        description: "Full headless command (Windows)."
         required: true
       PIN:
-        description: "CRD PIN (6+ digits). Default 123456"
+        description: "PIN (6+ digits)."
         required: false
         default: "123456"
       RETRIES:
-        description: "Retries for start-host (default 3)"
+        description: "CRD Retries"
         required: false
         default: "3"
 
 permissions:
   contents: read
 
-concurrency:
-  group: crd-register-${{ github.ref }}-${{ github.run_id }}
-  cancel-in-progress: false
+# Single source of truth for the GitLab armory location. Every asset fetched
+# in this workflow is resolved through GitLab's repository-files raw API
+# (the same api/v4/projects/.../repository/files/.../raw pattern every
+# MystraSiGiL .ps1 phase script uses to fetch Logger.ps1), not a plain
+# gitlab.com/-/raw/ URL - renaming or moving the GitLab repo/folder only
+# requires updating these values.
+#
+# Two separate targets, not one:
+#   - MYSTRASIGIL_GITLAB_PROJECT/BRANCH/FOLDER -> this ecosystem's own armory
+#     (runner map, Preload-Assets.ps1) living in ShahzaibYT/test's Windows/ folder.
+#   - MYSTRASIGIL_CORE_GITLAB_PROJECT/BRANCH -> the real, already-existing
+#     25-phase deployment engine (MystraSiGiL-GCRD-Instance.ps1, Logger.ps1,
+#     deployment-manifest.json, every phase script) living at the root of
+#     ShahzaibYT/test-me. This workflow calls that engine directly rather
+#     than inventing a second copy of it.
+env:
+  MYSTRASIGIL_GITLAB_PROJECT: "ShahzaibYT/test"
+  MYSTRASIGIL_GITLAB_BRANCH:  "main"
+  MYSTRASIGIL_GITLAB_FOLDER:  "Windows"
+  MYSTRASIGIL_CORE_GITLAB_PROJECT: "ShahzaibYT/test-me"
+  MYSTRASIGIL_CORE_GITLAB_BRANCH:  "main"
 
 jobs:
+  initializing-automation:
+    name: "Initializing Automation"
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    outputs:
+      runner_label: ${{ steps.resolve.outputs.runner_label }}
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - id: resolve
+        env:
+          PROFILE: ${{ github.event.inputs.RUNNER_PROFILE }}
+          GITLAB_PROJECT: ${{ env.MYSTRASIGIL_GITLAB_PROJECT }}
+          GITLAB_BRANCH:  ${{ env.MYSTRASIGIL_GITLAB_BRANCH }}
+          GITLAB_FOLDER:  ${{ env.MYSTRASIGIL_GITLAB_FOLDER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          # Same GitLab repository-files raw API every MystraSiGiL .ps1 phase
+          # script uses to fetch Logger.ps1 - not a plain gitlab.com/-/raw/ URL.
+          # Both the project path AND the in-repo file path (which itself
+          # contains a folder separator, e.g. "Windows/mystraSIGIL-runner-map.json")
+          # must be percent-encoded for GitLab's API - EscapeDataString handles
+          # the embedded "/" the same way it handles a literal space.
+          $gitlabProjectId = "$($env:GITLAB_PROJECT)".Replace("/", "%2F")
+          function Get-RemoteFileUrl([string]$FileName) {
+            $encodedFileName = [uri]::EscapeDataString("$($env:GITLAB_FOLDER)/$FileName")
+            return "https://gitlab.com/api/v4/projects/$gitlabProjectId/repository/files/$encodedFileName/raw?ref=$($env:GITLAB_BRANCH)"
+          }
+          $mapUrl = Get-RemoteFileUrl "mystraSIGIL-runner-map.json"
+          function Set-ResolveOutput([string]$runnerLabel) {
+            "runner_label=$runnerLabel"     >> $env:GITHUB_OUTPUT
+          }
+          function Resolve-Property([object]$obj, [string]$name) {
+            if ($null -eq $obj) { return $null }
+            $prop = $obj.PSObject.Properties[$name]
+            if ($null -eq $prop) { return $null }
+            return $prop.Value
+          }
+          function New-FallbackRunnerMap {
+            # Mirrors the v2 schema used in mystraSIGIL-runner-map.json.
+            return [pscustomobject]@{
+              version = 2
+              default_profile = "Windows 64 Core"
+              profiles = [pscustomobject]@{
+                'Windows 64 Core'          = [pscustomobject]@{ id='windows-64-core'; runner='windows-2022';        display_name='Windows 64 Core'; tier='stable' }
+                'Windows 128 Core'         = [pscustomobject]@{ id='windows-128-core'; runner='windows-latest';      display_name='Windows 128 Core'; tier='stable' }
+                'Windows 11 ARM'           = [pscustomobject]@{ id='windows-11-arm'; runner='windows-11-arm';        display_name='Windows 11 ARM'; tier='stable' }
+                'Windows High Performance' = [pscustomobject]@{ id='windows-high-perf'; runner='windows-2025';       display_name='Windows High Performance'; tier='preview' }
+                'Windows Enterprise'       = [pscustomobject]@{ id='windows-enterprise'; runner='windows-2025-vs2026'; display_name='Windows Enterprise'; tier='preview' }
+                'Windows ARM Enterprise'   = [pscustomobject]@{ id='windows-arm-enterprise'; runner='windows-11-vs2026-arm'; display_name='Windows ARM Enterprise'; tier='preview' }
+              }
+              runner_definitions = [pscustomobject]@{
+                'windows-2022'          = [pscustomobject]@{ github_label='windows-2022'; os='windows'; architecture='x64' }
+                'windows-latest'        = [pscustomobject]@{ github_label='windows-latest'; os='windows'; architecture='x64' }
+                'windows-11-arm'        = [pscustomobject]@{ github_label='windows-11-arm'; os='windows'; architecture='arm64' }
+                'windows-2025'          = [pscustomobject]@{ github_label='windows-2025'; os='windows'; architecture='x64' }
+                'windows-2025-vs2026'   = [pscustomobject]@{ github_label='windows-2025-vs2026'; os='windows'; architecture='x64' }
+                'windows-11-vs2026-arm' = [pscustomobject]@{ github_label='windows-11-vs2026-arm'; os='windows'; architecture='arm64' }
+              }
+              allowed_runners = @('windows-2022','windows-latest','windows-11-arm','windows-2025','windows-2025-vs2026','windows-11-vs2026-arm')
+            }
+          }
+          $selectedProfile = "$($env:PROFILE)"
+          if ([string]::IsNullOrWhiteSpace($mapUrl)) {
+            throw "Resolved runner-map URL is empty - check MYSTRASIGIL_GITLAB_PROJECT/BRANCH/FOLDER in the workflow env."
+          }
+          try {
+            $resp = $null
+            for ($i = 1; $i -le 3; $i++) {
+              try {
+                $resp = Invoke-WebRequest -Uri $mapUrl -UseBasicParsing -TimeoutSec 45
+                break
+              } catch {
+                if ($i -eq 3) { throw }
+                Start-Sleep -Seconds (2 * $i)
+              }
+            }
+            if ([string]::IsNullOrWhiteSpace($resp.Content)) {
+              throw "Hosted map returned empty content."
+            }
+            try {
+              $content = [string]$resp.Content
+              if ($content -match '(?m)^(<<<<<<<|=======|>>>>>>>)') {
+                throw "hosted map contains unresolved merge conflict markers"
+              }
+              if ($content.TrimStart().StartsWith('<')) {
+                throw "hosted map returned non-JSON content"
+              }
+              $cfg = $content | ConvertFrom-Json
+            } catch {
+              Write-Warning "Hosted map is invalid: $($_.Exception.Message). Using embedded fallback runner map so automation can continue."
+              $cfg = New-FallbackRunnerMap
+            }
+            $profiles = Resolve-Property $cfg 'profiles'
+            if ($null -eq $profiles) {
+              throw "Invalid map: missing 'profiles' object."
+            }
+            # Resolve the selected profile (display name -> profile object).
+            # Also accept profile 'id' or 'runner' for backward compatibility.
+            $profileObj = Resolve-Property $profiles $selectedProfile
+            $matchType = "display_name"
+            if ($null -eq $profileObj) {
+              foreach ($entry in $profiles.PSObject.Properties) {
+                $pObj = $entry.Value
+                $pId = if ($pObj.PSObject.Properties['id']) { [string]$pObj.id } else { $null }
+                $pRunner = if ($pObj.PSObject.Properties['runner']) { [string]$pObj.runner } else { $null }
+                if ($pId -eq $selectedProfile) { $profileObj = $pObj; $matchType = "id"; break }
+                if ($pRunner -eq $selectedProfile) { $profileObj = $pObj; $matchType = "runner"; break }
+              }
+            }
+            if ($null -eq $profileObj) {
+              $available = @($profiles.PSObject.Properties.Name) -join ', '
+              throw "Profile '$selectedProfile' not found in hosted map. Available: $available"
+            }
+            $runnerLabel = if ($profileObj.PSObject.Properties['runner']) { [string]$profileObj.runner } else { $null }
+            if ([string]::IsNullOrWhiteSpace("$runnerLabel")) {
+              throw "Profile '$selectedProfile' has no 'runner' field."
+            }
+            $allowed = Resolve-Property $cfg 'allowed_runners'
+            if ($null -eq $allowed -or @($allowed).Count -eq 0) {
+              throw "Invalid map: missing or empty 'allowed_runners' array."
+            } else {
+              $allowed = @($allowed | ForEach-Object { "$_".Trim() })
+            }
+            if ($allowed -notcontains "$runnerLabel") {
+              throw "Resolved runner '$runnerLabel' is not in allowlist: $($allowed -join ', ')"
+            }
+            Write-Host "Profile resolved: input='$selectedProfile' match=$matchType -> runner=$runnerLabel"
+            Set-ResolveOutput -runnerLabel "$runnerLabel"
+          }
+          catch {
+            throw "Hosted map resolution failed (fail-closed): $($_.Exception.Message)"
+          }
   crd-register:
-    name: "🪄 MystraSiGiL Windows 10"
-    runs-on: windows-2022
+    name: "mystraSIGIL"
+
+    needs: initializing-automation
+
+    runs-on: ${{ needs.initializing-automation.outputs.runner_label }}
+    timeout-minutes: 360
 
     env:
       RAW_CODE:      ${{ github.event.inputs.CODE }}
@@ -33,105 +206,176 @@ jobs:
       RETRIES_INPUT: ${{ github.event.inputs.RETRIES }}
       BRANCH:        ${{ github.ref_name }}
       RUNNER_ENV:    "hosted"
-      MystraSiGiL_Access_Token: ${{ secrets.MystraSiGiL_Access_Token }}
+      RUNNER_TITLE:  ${{ github.event.inputs.RUNNER_PROFILE }}
+      MYSTRASIGIL_RUNNER_LABEL: ${{ needs.initializing-automation.outputs.runner_label }}
+      Access_Token_by_Shahzaib: ${{ secrets.Access_Token_by_Shahzaib }}
 
     defaults:
       run:
         shell: pwsh
 
     steps:
-      - name: "🔧 Environment Summary (with quiet preload)"
+      - name: "Preflight"
+        env:
+          GITLAB_PROJECT:      ${{ env.MYSTRASIGIL_GITLAB_PROJECT }}
+          GITLAB_BRANCH:       ${{ env.MYSTRASIGIL_GITLAB_BRANCH }}
+          GITLAB_FOLDER:       ${{ env.MYSTRASIGIL_GITLAB_FOLDER }}
+          CORE_GITLAB_PROJECT: ${{ env.MYSTRASIGIL_CORE_GITLAB_PROJECT }}
+          CORE_GITLAB_BRANCH:  ${{ env.MYSTRASIGIL_CORE_GITLAB_BRANCH }}
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-          Write-Host "==============================================="
-          Write-Host "💻 OS Version        : $env:ImageOS"
-          Write-Host "🧠 Runner Machine    : $env:RUNNER_NAME"
-          Write-Host "🏷️ Repository        : $env:GITHUB_REPOSITORY"
-          Write-Host "🌿 Branch/Ref        : $env:BRANCH"
-          Write-Host "🔁 Workflow Run ID   : $env:GITHUB_RUN_ID"
-          Write-Host "==============================================="
-
-          if ($env:RAW_CODE)  { Write-Host "::add-mask::$($env:RAW_CODE)" }
-          if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
-
-          if (-not $env:MystraSiGiL_Access_Token) {
-            Write-Error "❌ Missing required repository secret: MystraSiGiL_Access_Token"
-            exit 1
+          # Same GitLab repository-files raw API every MystraSiGiL .ps1 phase
+          # script uses to fetch Logger.ps1 - not a plain gitlab.com/-/raw/ URL.
+          $gitlabProjectId = "$($env:GITLAB_PROJECT)".Replace("/", "%2F")
+          function Get-RemoteFileUrl([string]$FileName) {
+            $encodedFileName = [uri]::EscapeDataString("$($env:GITLAB_FOLDER)/$FileName")
+            return "https://gitlab.com/api/v4/projects/$gitlabProjectId/repository/files/$encodedFileName/raw?ref=$($env:GITLAB_BRANCH)"
           }
-          Write-Host "::add-mask::$($env:MystraSiGiL_Access_Token)"
-          Write-Host "🔐 Gate secret present: yes"
-
-          try {
-            $userDownloads = Join-Path $env:USERPROFILE 'Downloads'
-            if (-not (Test-Path $userDownloads)) { New-Item -ItemType Directory -Path $userDownloads | Out-Null }
-
-            $retries = 3
-            if ($env:RETRIES_INPUT) { try { $retries = [int]$env:RETRIES_INPUT } catch {} }
-            $dlAttempts = [Math]::Max(3, $retries)
-
-            $assets = @(
-              @{ Url = "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi"; Name = "crdhost.msi" },
-              @{ Url = "https://downloads.cloudflareclient.com/v1/download/windows/ga"; Name = "Cloudflare_WARP_x64.msi" },
-              @{ Url = "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip"; Name = "VBCABLE.zip" },
-              @{ Url = "https://code.visualstudio.com/sha/download?build=stable&os=win32-x64-user"; Name = "VisualStudio.exe" },
-              @{ Url = "https://nodejs.org/dist/v24.11.0/node-v24.11.0-x64.msi"; Name = "node-v24.msi" }
-              
-            )
-
-            function Download-Quiet([string]$Url,[string]$OutFile,[int]$Attempts) {
-              for ($i=1; $i -le $Attempts; $i++) {
-                try {
-                  Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -TimeoutSec 120
-                  if ((Test-Path -LiteralPath $OutFile) -and ((Get-Item $OutFile).Length -gt 0)) { return }
-                  throw "Downloaded file missing or zero-size."
-                } catch {
-                  if ($i -eq $Attempts) { throw }
-                  Start-Sleep -Seconds ([int][Math]::Min(20, ($i * 2)))
+          # The real 25-phase engine lives at the root of a different GitLab
+          # project (ShahzaibYT/test-me) - no Windows/ folder prefix.
+          $coreProjectId = "$($env:CORE_GITLAB_PROJECT)".Replace("/", "%2F")
+          function Get-CoreFileUrl([string]$FileName) {
+            $encodedFileName = [uri]::EscapeDataString($FileName)
+            return "https://gitlab.com/api/v4/projects/$coreProjectId/repository/files/$encodedFileName/raw?ref=$($env:CORE_GITLAB_BRANCH)"
+          }
+          function Test-RemoteText([string]$name, [string]$url) {
+            try {
+              $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 45 -MaximumRedirection 5
+              if ([string]::IsNullOrWhiteSpace($resp.Content)) {
+                throw "empty response"
+              }
+              Write-Host "Preflight OK: $name"
+            } catch {
+              throw "Preflight failed for ${name}: $($_.Exception.Message)"
+            }
+          }
+          if (-not $env:Access_Token_by_Shahzaib) {
+            throw "Missing required repository secret: Access_Token_by_Shahzaib"
+          }
+          Write-Host "::add-mask::$($env:Access_Token_by_Shahzaib)"
+          if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
+          if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
+          Test-RemoteText -name 'runner map' -url (Get-RemoteFileUrl "mystraSIGIL-runner-map.json")
+          Test-RemoteText -name 'preload script' -url (Get-RemoteFileUrl "Preload-Assets.ps1")
+          Test-RemoteText -name 'core engine (MystraSiGiL-GCRD-Instance.ps1)' -url (Get-CoreFileUrl "MystraSiGiL-GCRD-Instance.ps1")
+      - name: "Preload"
+        env:
+          GITLAB_PROJECT: ${{ env.MYSTRASIGIL_GITLAB_PROJECT }}
+          GITLAB_BRANCH:  ${{ env.MYSTRASIGIL_GITLAB_BRANCH }}
+          GITLAB_FOLDER:  ${{ env.MYSTRASIGIL_GITLAB_FOLDER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          # Same GitLab repository-files raw API every MystraSiGiL .ps1 phase
+          # script uses to fetch Logger.ps1 - not a plain gitlab.com/-/raw/ URL.
+          $gitlabProjectId = "$($env:GITLAB_PROJECT)".Replace("/", "%2F")
+          function Get-RemoteFileUrl([string]$FileName) {
+            $encodedFileName = [uri]::EscapeDataString("$($env:GITLAB_FOLDER)/$FileName")
+            return "https://gitlab.com/api/v4/projects/$gitlabProjectId/repository/files/$encodedFileName/raw?ref=$($env:GITLAB_BRANCH)"
+          }
+          function Invoke-DownloadWithRetry([string]$url, [string]$outFile, [int]$maxAttempts = 3) {
+            $lastError = $null
+            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+              try {
+                Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -TimeoutSec 120
+                if (-not (Test-Path -LiteralPath $outFile)) {
+                  throw "Downloaded file not found at $outFile"
+                }
+                return
+              } catch {
+                $lastError = $_
+                if ($attempt -lt $maxAttempts) {
+                  Start-Sleep -Seconds (2 * $attempt)
                 }
               }
             }
-
-            foreach ($a in $assets) {
-              $dest = Join-Path $userDownloads $a.Name
-              Download-Quiet -Url $a.Url -OutFile $dest -Attempts $dlAttempts
-            }
-
-            Write-Host "📁 Save location: $userDownloads"
-          } catch {
-            Write-Error "❌ Preload failed: $($_.Exception.Message)"
+            throw "Failed to download $url after $maxAttempts attempts. $($lastError.Exception.Message)"
           }
-
-      - name: "🌟 MystraSiGiL Magical Setup & Execution"
-        id: setup
+          if (-not $env:Access_Token_by_Shahzaib) {
+            Write-Error "Missing required repository secret: Access_Token_by_Shahzaib"
+            exit 1
+          }
+          Write-Host "::add-mask::$($env:Access_Token_by_Shahzaib)"
+          if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
+          if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
+          Write-Host "Access token present: yes"
+          $preloadUrl  = Get-RemoteFileUrl "Preload-Assets.ps1"
+          $preloadTemp = Join-Path $env:TEMP ("Preload-Assets_{0}.ps1" -f $env:GITHUB_RUN_ID)
+          try {
+            Invoke-DownloadWithRetry -url $preloadUrl -outFile $preloadTemp -maxAttempts 3
+            powershell.exe -ExecutionPolicy Bypass -File $preloadTemp
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "Preload script reported exit code $LASTEXITCODE. Continuing so main automation can still attempt every phase."
+              $global:LASTEXITCODE = 0
+            }
+          } catch {
+            Write-Warning "Preload step failed non-fatally: $($_.Exception.Message). Continuing to Execute phase."
+            $global:LASTEXITCODE = 0
+          } finally {
+            if (Test-Path -LiteralPath $preloadTemp) {
+              Remove-Item -LiteralPath $preloadTemp -Force -ErrorAction SilentlyContinue
+            }
+          }
+      - name: "Execute"
+        env:
+          CORE_GITLAB_PROJECT: ${{ env.MYSTRASIGIL_CORE_GITLAB_PROJECT }}
+          CORE_GITLAB_BRANCH:  ${{ env.MYSTRASIGIL_CORE_GITLAB_BRANCH }}
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-          try {
-            $url = "https://gitlab.com/ShahzaibYT/test-me/-/raw/main/MystraSiGiL-GCRD-Instance.ps1"
-            Invoke-WebRequest -Uri $url -OutFile "MystraSiGiL-GCRD-Instance.ps1" -UseBasicParsing -TimeoutSec 120
-
-            if (-not (Test-Path -LiteralPath "./MystraSiGiL-GCRD-Instance.ps1")) {
-              Write-Error "❌ Failed to download MystraSiGiL-GCRD-Instance.ps1"
-              exit 1
+          # The real 25-phase engine (MystraSiGiL-GCRD-Instance.ps1) lives at
+          # the root of ShahzaibYT/test-me - fetched via the same GitLab
+          # repository-files raw API pattern, no Windows/ folder prefix.
+          $coreProjectId = "$($env:CORE_GITLAB_PROJECT)".Replace("/", "%2F")
+          function Get-CoreFileUrl([string]$FileName) {
+            $encodedFileName = [uri]::EscapeDataString($FileName)
+            return "https://gitlab.com/api/v4/projects/$coreProjectId/repository/files/$encodedFileName/raw?ref=$($env:CORE_GITLAB_BRANCH)"
+          }
+          function Invoke-DownloadWithRetry([string]$url, [string]$outFile, [int]$maxAttempts = 3) {
+            $lastError = $null
+            for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+              try {
+                Invoke-WebRequest -Uri $url -OutFile $outFile -UseBasicParsing -TimeoutSec 120
+                if (-not (Test-Path -LiteralPath $outFile)) {
+                  throw "Downloaded file not found at $outFile"
+                }
+                return
+              } catch {
+                $lastError = $_
+                if ($attempt -lt $maxAttempts) {
+                  Start-Sleep -Seconds (2 * $attempt)
+                }
+              }
             }
-
-            powershell.exe -ExecutionPolicy Bypass -File ".\MystraSiGiL-GCRD-Instance.ps1" `
-              -Code       ($env:RAW_CODE) `
-              -Pin        ($env:PIN_INPUT) `
-              -Retries    ($env:RETRIES_INPUT) `
-              -GateSecret ($env:MystraSiGiL_Access_Token)
-              
-            Write-Host "==============================================="
-            Write-Host "🪄 MystraSiGiL Windows 10 (Sound Enabled)"
-            Write-Host "🪄 https://www.youtube.com/@ShahzaibYT-itxsb"
-            Write-Host "🪄 Powered by: Shahzaib-YT"
-            Write-Host "==============================================="
-          } catch {
-            Write-Error "⚠️ MystraSiGiL-GCRD-Instance.ps1 execution error: $($_.Exception.Message)"
-            exit 1
+            throw "Failed to download $url after $maxAttempts attempts. $($lastError.Exception.Message)"
+          }
+          if (-not $env:Access_Token_by_Shahzaib) {
+            throw "Missing required repository secret: Access_Token_by_Shahzaib"
+          }
+          Write-Host "::add-mask::$($env:Access_Token_by_Shahzaib)"
+          if ($env:RAW_CODE) { Write-Host "::add-mask::$($env:RAW_CODE)" }
+          if ($env:PIN_INPUT) { Write-Host "::add-mask::$($env:PIN_INPUT)" }
+          # RAW_CODE/PIN_INPUT/RETRIES_INPUT are already set on this job's
+          # environment (see the crd-register job's env: block) and the core
+          # engine reads them directly via $env: - it declares no -Code/-Pin/
+          # -Retries parameters, so passing them as switches here would throw
+          # "a parameter cannot be found that matches parameter name 'Code'".
+          # Only -GateSecret is an actual accepted parameter.
+          $url      = Get-CoreFileUrl "MystraSiGiL-GCRD-Instance.ps1"
+          $scriptTp = Join-Path $env:TEMP ("MystraSiGiL-GCRD-Instance_{0}.ps1" -f $env:GITHUB_RUN_ID)
+          try {
+            Invoke-DownloadWithRetry -url $url -outFile $scriptTp -maxAttempts 3
+            powershell.exe -ExecutionPolicy Bypass -File $scriptTp `
+              -GateSecret ($env:Access_Token_by_Shahzaib)
+            if ($LASTEXITCODE -ne 0) {
+              throw "Execution script failed with exit code $LASTEXITCODE"
+            }
+          } finally {
+            if (Test-Path -LiteralPath $scriptTp) {
+              Remove-Item -LiteralPath $scriptTp -Force -ErrorAction SilentlyContinue
+            }
           }
