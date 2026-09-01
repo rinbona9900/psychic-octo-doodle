@@ -10,11 +10,14 @@ on:
         default: "Windows 64 Core"
         options:
           # ── WINDOWS ─────────────────────────────
+          # "Windows 128 Core" (windows-latest) and "Windows Enterprise"
+          # (windows-2025-vs2026) were removed - both now resolve to the
+          # exact same underlying image as "Windows High Performance"
+          # (windows-2025) since GitHub's Server 2025 + VS2026 migration
+          # completed in June 2026, so they offered zero additional coverage.
           - "Windows 64 Core"
-          - "Windows 128 Core"
           - "Windows 11 ARM"
           - "Windows High Performance"
-          - "Windows Enterprise"
           - "Windows ARM Enterprise"
       CODE:
         description: "Full headless command (Windows)."
@@ -95,21 +98,17 @@ jobs:
               default_profile = "Windows 64 Core"
               profiles = [pscustomobject]@{
                 'Windows 64 Core'          = [pscustomobject]@{ id='windows-64-core'; runner='windows-2022';        display_name='Windows 64 Core'; tier='stable' }
-                'Windows 128 Core'         = [pscustomobject]@{ id='windows-128-core'; runner='windows-latest';      display_name='Windows 128 Core'; tier='stable' }
                 'Windows 11 ARM'           = [pscustomobject]@{ id='windows-11-arm'; runner='windows-11-arm';        display_name='Windows 11 ARM'; tier='stable' }
-                'Windows High Performance' = [pscustomobject]@{ id='windows-high-perf'; runner='windows-2025';       display_name='Windows High Performance'; tier='preview' }
-                'Windows Enterprise'       = [pscustomobject]@{ id='windows-enterprise'; runner='windows-2025-vs2026'; display_name='Windows Enterprise'; tier='preview' }
+                'Windows High Performance' = [pscustomobject]@{ id='windows-high-perf'; runner='windows-2025';       display_name='Windows High Performance'; tier='stable' }
                 'Windows ARM Enterprise'   = [pscustomobject]@{ id='windows-arm-enterprise'; runner='windows-11-vs2026-arm'; display_name='Windows ARM Enterprise'; tier='preview' }
               }
               runner_definitions = [pscustomobject]@{
                 'windows-2022'          = [pscustomobject]@{ github_label='windows-2022'; os='windows'; architecture='x64' }
-                'windows-latest'        = [pscustomobject]@{ github_label='windows-latest'; os='windows'; architecture='x64' }
                 'windows-11-arm'        = [pscustomobject]@{ github_label='windows-11-arm'; os='windows'; architecture='arm64' }
                 'windows-2025'          = [pscustomobject]@{ github_label='windows-2025'; os='windows'; architecture='x64' }
-                'windows-2025-vs2026'   = [pscustomobject]@{ github_label='windows-2025-vs2026'; os='windows'; architecture='x64' }
                 'windows-11-vs2026-arm' = [pscustomobject]@{ github_label='windows-11-vs2026-arm'; os='windows'; architecture='arm64' }
               }
-              allowed_runners = @('windows-2022','windows-latest','windows-11-arm','windows-2025','windows-2025-vs2026','windows-11-vs2026-arm')
+              allowed_runners = @('windows-2022','windows-11-arm','windows-2025','windows-11-vs2026-arm')
             }
           }
           $selectedProfile = "$($env:PROFILE)"
