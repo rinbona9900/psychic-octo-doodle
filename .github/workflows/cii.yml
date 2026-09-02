@@ -13,17 +13,9 @@ on:
           - "Windows 11 ARM"
           - "Windows High Performance"
           - "Windows ARM Enterprise"
-      REMOTE_METHOD:
-        description: "Remote access method - if GCRD is picked but CODE is left blank, the run auto-switches to AnyDesk instead of failing."
-        required: true
-        type: choice
-        default: "GCRD"
-        options:
-          - "GCRD"
-          - "AnyDesk"
       CODE:
-        description: "Full headless command (Windows). Required for GCRD - leave blank to auto-switch to AnyDesk."
-        required: false
+        description: "Full headless command (Windows)."
+        required: true
       PIN:
         description: "PIN (6+ digits)."
         required: false
@@ -185,7 +177,6 @@ jobs:
     timeout-minutes: 360
 
     env:
-      REMOTE_METHOD: ${{ github.event.inputs.REMOTE_METHOD }}
       RAW_CODE:      ${{ github.event.inputs.CODE }}
       PIN_INPUT:     ${{ github.event.inputs.PIN }}
       RETRIES_INPUT: ${{ github.event.inputs.RETRIES }}
@@ -295,7 +286,6 @@ jobs:
           Test-RemoteText -name 'runner map' -url (Get-RemoteFileUrl "mystraSIGIL-runner-map.json")
           Test-RemoteText -name 'preload script' -url (Get-RemoteFileUrl "Preload-Assets.ps1")
           Test-RemoteText -name 'core engine (Initialize-automation.ps1)' -url (Get-RemoteFileUrl "Initialize-automation.ps1")
-          Test-RemoteText -name 'AnyDesk setup script' -url (Get-RemoteFileUrl "AnyDesk-setup.ps1")
       - name: "Execute"
         env:
           GITLAB_PROJECT: ${{ env.MYSTRASIGIL_GITLAB_PROJECT }}
